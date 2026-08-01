@@ -15,8 +15,6 @@ namespace SysManager.Services;
 
 /// <summary>
 /// Applies pt-BR translations to both static and dynamically-bound WPF text.
-/// Translation data lives in <see cref="PtBrTranslationCatalog"/> so the catalog can grow
-/// independently while the runtime observer remains small and testable.
 /// </summary>
 public static class PtBrLocalizationService
 {
@@ -32,7 +30,12 @@ public static class PtBrLocalizationService
         Thread.CurrentThread.CurrentUICulture = culture;
     }
 
-    public static string Translate(string? text) => PtBrTranslationCatalog.Translate(text);
+    public static string Translate(string? text)
+    {
+        if (PtBrMigrationCatalog.TryTranslate(text, out var migrated))
+            return migrated;
+        return PtBrTranslationCatalog.Translate(text);
+    }
 
     public static void Attach(Window window)
     {
@@ -137,7 +140,6 @@ public static class PtBrLocalizationService
         if (Observed.TryGetValue(element, out _)) return;
         Observed.Add(element, Marker);
 
-        // Window derives from ContentControl, so it must be matched BEFORE ContentControl.
         switch (element)
         {
             case Window window:
