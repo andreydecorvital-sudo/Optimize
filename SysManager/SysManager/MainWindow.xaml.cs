@@ -19,6 +19,9 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
+        // Optimize usa pt-BR como idioma padrão durante a transformação da base.
+        PtBrLocalizationService.Attach(this);
+
         // Ensure ViewModel disposal even if OnClosed is not called (e.g. app shutdown)
         if (Application.Current != null)
             Application.Current.Exit += OnApplicationExit;
@@ -29,8 +32,8 @@ public partial class MainWindow : Window
 
     private void OnToastRequested(string title, string detail)
     {
-        ToastTitle.Text = title;
-        ToastDetail.Text = detail;
+        ToastTitle.Text = PtBrLocalizationService.Translate(title);
+        ToastDetail.Text = PtBrLocalizationService.Translate(detail);
         ToastOverlay.Visibility = Visibility.Visible;
         ToastOverlay.Opacity = 0;
         var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(200));
@@ -54,12 +57,6 @@ public partial class MainWindow : Window
         (DataContext as MainWindowViewModel)?.Dispose();
     }
 
-    /// <summary>
-    /// Prevents the non-client area (title bar, borders) from visually
-    /// dimming when the window loses focus.  This stops ModernWPF's
-    /// chrome from graying-out buttons and other controls.
-    /// Fixes #252, #251, #248, #245.
-    /// </summary>
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
@@ -69,9 +66,6 @@ public partial class MainWindow : Window
             ApplyDarkTitleBar(source.Handle);
         }
 
-        // Initialize tray icon after window handle is available. Pass a navigation callback so the
-        // tray's "Volume mixer" shortcut can jump to that tab — the View layer legitimately knows
-        // the shell view-model, keeping the tray service itself free of a ViewModels dependency.
         if (Application.Current is App app && app.TrayService != null)
             app.TrayService.Initialize(this, navId =>
             {
@@ -93,9 +87,6 @@ public partial class MainWindow : Window
     {
         if (msg == WM_NCACTIVATE)
         {
-            // Force the non-client area to always render as "active".
-            // wParam = 1 means active, 0 means inactive.
-            // By always passing TRUE we keep the chrome looking active.
             handled = true;
             return DefWindowProc(hwnd, msg, new IntPtr(1), lParam);
         }
@@ -105,25 +96,28 @@ public partial class MainWindow : Window
     [System.Runtime.InteropServices.LibraryImport("user32.dll", EntryPoint = "DefWindowProcW")]
     private static partial IntPtr DefWindowProc(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
-    /// <summary>Click on a single-item group (Dashboard, Network).</summary>
     private void SingleGroup_Click(object sender, MouseButtonEventArgs e)
     {
         if (sender is FrameworkElement fe && fe.Tag is NavItem item
             && DataContext is MainWindowViewModel vm)
+        {
             vm.SelectedNav = item;
+            Dispatcher.BeginInvoke(() => PtBrLocalizationService.TranslateWindow(this));
+        }
     }
 
-    /// <summary>Click on a child item inside an expanded group.</summary>
     private void NavChild_Click(object sender, MouseButtonEventArgs e)
     {
         if (sender is FrameworkElement fe && fe.Tag is NavItem item
             && DataContext is MainWindowViewModel vm)
+        {
             vm.SelectedNav = item;
+            Dispatcher.BeginInvoke(() => PtBrLocalizationService.TranslateWindow(this));
+        }
     }
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
-        // Minimize to tray instead of closing (if enabled)
         if (Application.Current is App app && app.TrayService is { MinimizeToTray: true })
         {
             e.Cancel = true;
@@ -141,8 +135,6 @@ public partial class MainWindow : Window
 
     private void ThemeBtn_Click(object sender, MouseButtonEventArgs e) => ToggleThemePopup();
 
-    // Enter/Space activate the theme chip for keyboard users, matching a Button's behaviour
-    // (the chip is a Border, so it does not get this for free).
     private void ThemeBtn_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key is Key.Enter or Key.Space)
@@ -157,5 +149,6 @@ public partial class MainWindow : Window
         if (ThemePopupHost.Child is null)
             ThemePopupHost.Child = new Views.ThemePopup();
         ThemePopupHost.IsOpen = !ThemePopupHost.IsOpen;
+        Dispatcher.BeginInvoke(() => PtBrLocalizationService.TranslateWindow(this));
     }
 }
