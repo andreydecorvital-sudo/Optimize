@@ -16,9 +16,13 @@ public sealed class OptimizationCompatibilityService
     public const string AmdProfile = "gpu.amd.profile";
     public const string IntelProfile = "gpu.intel.profile";
     public const string UltimatePerformance = "power.ultimate-performance";
+    public const string VisualEffects = "windows.visual-effects";
     public const string CpuAffinity = "gaming.cpu-affinity";
+    public const string CpuPriority = "gaming.cpu-priority";
     public const string TimerResolution = "gaming.timer-resolution";
     public const string StandbyMemoryPurge = "memory.standby-purge";
+    public const string PauseSearchIndexing = "windows.search-pause";
+    public const string SilenceNotifications = "gaming.silence-notifications";
     public const string Xmp = "bios.xmp";
     public const string Expo = "bios.expo";
     public const string ResizableBar = "bios.resizable-bar";
@@ -42,13 +46,11 @@ public sealed class OptimizationCompatibilityService
         return optimizationId switch
         {
             Xmp => Guidance(optimizationId,
-                hardware.CpuVendor == CpuVendor.Amd
-                    ? "XMP depende da placa-mãe, BIOS e do kit de memória. O Optimize pode orientar, mas não deve habilitar isso automaticamente."
-                    : "XMP é uma configuração de firmware/memória. O Optimize pode orientar, mas não deve habilitar isso automaticamente.", context),
+                "XMP depende do processador, placa-mãe, BIOS e kit de memória. O Optimize pode orientar e validar sinais de compatibilidade, mas não deve habilitar firmware automaticamente.", context),
 
             Expo => Guidance(optimizationId,
                 hardware.CpuVendor == CpuVendor.Amd
-                    ? "EXPO é compatível com plataformas AMD específicas, mas suporte real depende da placa-mãe, BIOS e memória. Somente orientação."
+                    ? "EXPO é voltado a plataformas AMD compatíveis, mas o suporte real depende da placa-mãe, BIOS e memória. Somente orientação."
                     : "EXPO é voltado a plataformas AMD compatíveis. Este hardware não fornece evidência suficiente para alteração automática.", context),
 
             ResizableBar => Guidance(optimizationId,
@@ -56,17 +58,37 @@ public sealed class OptimizationCompatibilityService
 
             UltimatePerformance => EvaluatePowerPlan(optimizationId, hardware, runningOnBattery, context),
 
+            VisualEffects => new OptimizationCompatibility(
+                optimizationId, CompatibilityState.RequiresConfirmation,
+                "A redução de efeitos visuais é reversível, mas muda a experiência do Windows. O estado atual deve ser salvo antes da alteração.", context),
+
             CpuAffinity when hardware.CpuThreads >= 2 => new OptimizationCompatibility(
                 optimizationId, CompatibilityState.RequiresConfirmation,
-                "Afinidade de CPU só deve ser aplicada por processo/jogo e sempre com o valor original salvo para reversão.", context),
+                "Afinidade de CPU só deve ser aplicada por processo/jogo e sempre com a máscara original salva para reversão.", context),
+
+            CpuAffinity => new OptimizationCompatibility(
+                optimizationId, CompatibilityState.Blocked,
+                "Não há topologia de CPU suficiente para definir uma afinidade segura.", context),
+
+            CpuPriority => new OptimizationCompatibility(
+                optimizationId, CompatibilityState.RequiresConfirmation,
+                "Prioridade de CPU pode favorecer o jogo, mas deve ser aplicada somente ao processo escolhido e restaurada ao final da sessão.", context),
 
             TimerResolution => new OptimizationCompatibility(
                 optimizationId, CompatibilityState.RequiresConfirmation,
-                "Resolução de temporizador é permitida apenas em sessão de jogo, com reversão automática ao encerrar o processo.", context),
+                "Resolução de temporizador é permitida apenas em sessão de jogo, com reversão automática ao encerrar o processo ou o perfil.", context),
 
             StandbyMemoryPurge => new OptimizationCompatibility(
                 optimizationId, CompatibilityState.RequiresConfirmation,
-                "A limpeza da lista standby é temporária e não deve rodar continuamente. Pode ser usada de forma pontual e reversível.", context),
+                "A limpeza da lista standby é temporária e não deve rodar continuamente. Pode ser usada de forma pontual e nunca como 'limpeza de RAM' permanente.", context),
+
+            PauseSearchIndexing => new OptimizationCompatibility(
+                optimizationId, CompatibilityState.RequiresConfirmation,
+                "A indexação pode ser pausada apenas temporariamente durante a sessão, preservando se o serviço já estava parado e restaurando o estado anterior depois.", context),
+
+            SilenceNotifications => new OptimizationCompatibility(
+                optimizationId, CompatibilityState.RequiresConfirmation,
+                "Notificações podem ser silenciadas durante o jogo se o valor anterior for salvo e restaurado ao encerrar a sessão.", context),
 
             _ => new OptimizationCompatibility(
                 optimizationId, CompatibilityState.Blocked,
