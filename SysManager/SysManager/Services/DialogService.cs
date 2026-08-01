@@ -8,7 +8,8 @@ namespace SysManager.Services;
 
 /// <summary>
 /// Production implementation of <see cref="IDialogService"/> using WPF MessageBox.
-/// Access via <see cref="Instance"/> singleton or inject via constructor.
+/// All user-facing dialog text passes through the Optimize pt-BR catalog so inherited
+/// confirmations cannot bypass localization.
 /// </summary>
 public sealed class DialogService : IDialogService
 {
@@ -24,7 +25,9 @@ public sealed class DialogService : IDialogService
     public bool Confirm(string message, string title)
     {
         if (Application.Current == null) return false;
-        var result = MessageBox.Show(message, title, MessageBoxButton.YesNo, MessageBoxImage.Question);
+        var localizedMessage = PtBrLocalizationService.Translate(message);
+        var localizedTitle = PtBrLocalizationService.Translate(title);
+        var result = MessageBox.Show(localizedMessage, localizedTitle, MessageBoxButton.YesNo, MessageBoxImage.Question);
         return result == MessageBoxResult.Yes;
     }
 }
