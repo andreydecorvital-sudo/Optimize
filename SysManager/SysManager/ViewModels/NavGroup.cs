@@ -4,6 +4,7 @@
 
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
+using SysManager.Services;
 
 namespace SysManager.ViewModels;
 
@@ -14,8 +15,16 @@ namespace SysManager.ViewModels;
 /// </summary>
 public sealed partial class NavGroup : ObservableObject
 {
+    private string _label = string.Empty;
+
     public required string Id { get; init; }
-    public required string Label { get; init; }
+
+    public required string Label
+    {
+        get => PtBrLocalizationService.Translate(_label);
+        init => _label = value;
+    }
+
     public required string Glyph { get; init; }
 
     [ObservableProperty] private bool _isExpanded;
