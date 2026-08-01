@@ -1,4 +1,4 @@
-// Optimize · mission experience for Dashboard
+// Optimize · mission experience + cross-vendor telemetry for Dashboard
 // Based on SysManager (MIT) — original license preserved in repository.
 
 using System.Collections.ObjectModel;
@@ -13,7 +13,10 @@ namespace SysManager.ViewModels;
 public sealed partial class DashboardViewModel
 {
     private readonly ObservableCollection<OptimizationMission> _optimizeMissions = new();
+    private readonly GpuTelemetryService _optimizeGpuTelemetry = new();
+    private readonly CancellationTokenSource _optimizeTelemetryCts = new();
     private int _missionLoadStarted;
+    private int _telemetryStarted;
 
     [ObservableProperty] private bool _isOptimizeMissionsLoading;
     [ObservableProperty] private string _optimizeHardwareSummary = "Identificando seu hardware...";
@@ -35,7 +38,59 @@ public sealed partial class DashboardViewModel
     private void EnsureOptimizeMissionsStarted()
     {
         if (Interlocked.Exchange(ref _missionLoadStarted, 1) != 0) return;
+        StartCrossVendorGpuTelemetry();
         _ = RefreshOptimizeMissionsAsync();
+    }
+
+    private void StartCrossVendorGpuTelemetry()
+    {
+        if (Interlocked.Exchange(ref _telemetryStarted, 1) != 0) return;
+        var ct = _optimizeTelemetryCts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    if (!IsActive)
+                    {
+                        await Task.Delay(1000, ct).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    var gpus = await _optimizeGpuTelemetry.ReadAsync(ct).ConfigureAwait(false);
+                    var primary = gpus
+                        .OrderBy(g => g.Vendor == GpuVendor.Unknown || g.Vendor == GpuVendor.Other)
+                        .ThenBy(g => g.Name.Contains("Microsoft", StringComparison.OrdinalIgnoreCase))
+                        .ThenByDescending(g => g.MemoryTotalGB ?? 0)
+                        .FirstOrDefault();
+
+                    if (primary is not null)
+                    {
+                        System.Windows.Application.Current?.Dispatcher.BeginInvoke(() =>
+                        {
+                            GpuName = primary.Name;
+                            if (primary.LoadPercent.HasValue)
+                                GpuPercent = Math.Clamp(primary.LoadPercent.Value, 0, 100);
+                            if (!string.IsNullOrWhiteSpace(primary.MemoryDisplay))
+                                GpuVram = primary.MemoryDisplay;
+                        });
+                    }
+
+                    await Task.Delay(750, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug(ex, "Optimize GPU telemetry polling failed");
+                    await Task.Delay(2000, ct).ConfigureAwait(false);
+                }
+            }
+        }, ct);
     }
 
     [RelayCommand]
