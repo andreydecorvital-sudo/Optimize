@@ -1,0 +1,49 @@
+name: Validate SystemManager baseline
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.head_ref == 'agent/systemmanager-base'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore SysManager/SysManager.sln
+
+      - name: Build application
+        run: dotnet build SysManager/SysManager/SysManager.csproj --configuration Release --no-restore
+
+      - name: Publish portable Windows x64
+        run: >-
+          dotnet publish SysManager/SysManager/SysManager.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          --no-restore
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=None
+          -p:DebugSymbols=false
+          --output artifacts/SysManager-win-x64
+
+      - name: Upload baseline executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: systemmanager-baseline-win-x64
+          path: artifacts/SysManager-win-x64/
+          if-no-files-found: error
