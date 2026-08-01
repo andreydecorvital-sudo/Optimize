@@ -15,7 +15,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 ROOT = REPO / "SysManager" / "SysManager"
 REPORT = REPO / "artifacts" / "ptbr-audit.txt"
-CATALOG = ROOT / "Services" / "PtBrTranslationCatalog.cs"
+CATALOGS = [
+    ROOT / "Services" / "PtBrTranslationCatalog.cs",
+    ROOT / "Services" / "PtBrMigrationCatalog.cs",
+]
 
 UI_ATTR = re.compile(
     r'\b(?:Text|Content|Header|ToolTip|AutomationProperties\.Name|Title)="([^"]+)"'
@@ -35,6 +38,7 @@ ENGLISH_HINTS = {
     "monitor", "history", "repair", "manager", "recommended", "requires",
     "application", "applications", "current", "failed", "successful", "start",
     "stop", "refresh", "create", "delete", "export", "import", "configuration",
+    "cancel", "failed", "cannot", "completed", "ready", "folder", "selected",
 }
 
 TECHNICAL_ALLOW = {
@@ -44,6 +48,7 @@ TECHNICAL_ALLOW = {
     "Hyper-V", "WSL", "Docker", "Edge", "OneDrive", "Defender", "XMP", "EXPO",
     "Resizable BAR", "SAM", "FPS", "MHz", "GHz", "GB", "MB", "KB", "ms",
     "IPv4", "IPv6", "TCP", "UDP", "HTTP", "HTTPS", "USB", "SATA", "SCSI",
+    "CSV", "XML", "SFC", "DISM", "PATH", "TEMP", "WebView2",
 }
 
 CS_UI_MARKERS = (
@@ -52,19 +57,16 @@ CS_UI_MARKERS = (
 )
 
 
-def decode(value: str) -> str:
-    value = html.unescape(value)
-    return bytes(value, "utf-8").decode("unicode_escape") if "\\" in value else value.strip()
-
-
 def load_catalog_keys() -> set[str]:
-    if not CATALOG.exists():
-        return set()
     keys: set[str] = set()
-    for line in CATALOG.read_text(encoding="utf-8", errors="ignore").splitlines():
-        match = CATALOG_KEY.match(line)
-        if match:
-            keys.add(match.group(1).replace('\\"', '"').strip().casefold())
+    for catalog in CATALOGS:
+        if not catalog.exists():
+            continue
+        for line in catalog.read_text(encoding="utf-8", errors="ignore").splitlines():
+            match = CATALOG_KEY.match(line)
+            if match:
+                key = match.group(1).replace('\\"', '"').replace('\\\\', '\\').strip()
+                keys.add(key.casefold())
     return keys
 
 
@@ -72,17 +74,22 @@ TRANSLATED = load_catalog_keys()
 
 
 def skip(text: str) -> bool:
+    text = text.strip()
     if not text or text in TECHNICAL_ALLOW:
         return True
     if text.casefold() in TRANSLATED:
         return True
     if text.startswith(("{Binding", "{DynamicResource", "{StaticResource", "{x:", "&#x")):
         return True
+    if re.fullmatch(r"\{[^{}]+\}", text):
+        return True
     if text.startswith(("http://", "https://", "pack://")):
         return True
     if re.fullmatch(r"[\d\W_]+", text):
         return True
-    if re.fullmatch(r"[A-Z0-9_.:/\\-]{2,}", text) and " " not in text:
+    if re.fullmatch(r"[A-Z0-9_.:/\\%-]{2,}", text) and " " not in text:
+        return True
+    if "\\Software\\" in text or text.startswith(("HKCU", "HKLM", "HKEY_")):
         return True
     return False
 
@@ -108,7 +115,7 @@ def scan_xaml(path: Path) -> list[tuple[int, str]]:
 
 def scan_cs(path: Path) -> list[tuple[int, str]]:
     findings: list[tuple[int, str]] = []
-    if path.name in {"PtBrTranslationCatalog.cs", "PtBrLocalizationService.cs"}:
+    if path.name in {"PtBrTranslationCatalog.cs", "PtBrLocalizationService.cs", "PtBrMigrationCatalog.cs"}:
         return findings
     for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
         stripped = line.strip()
@@ -141,7 +148,7 @@ def main() -> int:
         "Optimize pt-BR audit",
         "====================",
         f"Possíveis textos visíveis ainda em inglês: {len(all_findings)}",
-        f"Textos cobertos pelo catálogo: {len(TRANSLATED)}",
+        f"Textos cobertos pelos catálogos: {len(TRANSLATED)}",
         "",
     ]
     for path, lineno, text in all_findings:
