@@ -10,4 +10,4 @@ The upstream LICENSE file is preserved. Optimize-specific changes are developed 
 
 ## Import policy
 
-Upstream GitHub Actions workflows are intentionally not imported. Build and release automation in this repository must be reviewed and maintained by the Optimize project.
+Upstream GitHub Actions workflows are intentionally not imported. Build and release automation in this repository must be reviewed and maintained by the Optimize project. The imported baseline is validated in a Windows runner before any rebranding or feature removal.
