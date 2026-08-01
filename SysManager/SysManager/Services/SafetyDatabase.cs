@@ -17,7 +17,7 @@ public static class SafetyDatabase
             return (SafetyLevel.Caution, caution);
         if (CriticalServices.TryGetValue(serviceName, out var critical))
             return (SafetyLevel.Critical, critical);
-        return (SafetyLevel.Critical, "Unknown service — treat as critical until verified.");
+        return (SafetyLevel.Critical, "Serviço desconhecido — trate como crítico até que a compatibilidade seja verificada.");
     }
 
     public static (SafetyLevel Level, string Description) GetFeatureSafety(string featureName)
@@ -28,103 +28,103 @@ public static class SafetyDatabase
             return (SafetyLevel.Caution, caution);
         if (CriticalFeatures.TryGetValue(featureName, out var critical))
             return (SafetyLevel.Critical, critical);
-        return (SafetyLevel.Caution, "Check documentation before modifying.");
+        return (SafetyLevel.Caution, "Verifique a documentação e o uso deste computador antes de modificar este recurso.");
     }
 
     private static readonly FrozenDictionary<string, string> SafeServices = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
-        ["DiagTrack"] = "Connected User Experiences and Telemetry — sends diagnostic data to Microsoft. Disabling stops all telemetry.",
-        ["dmwappushservice"] = "WAP Push Message Routing — used for telemetry delivery. Safe to disable.",
-        ["SysMain"] = "Superfetch — prefetches apps into memory. Unnecessary on SSD, wastes write cycles.",
-        ["WSearch"] = "Windows Search Indexer — indexes files for fast search. Disable if you use Everything or don't search in Explorer.",
-        ["MapsBroker"] = "Downloaded Maps Manager — background map updates. Safe unless you use Windows Maps.",
-        ["lfsvc"] = "Geolocation Service — tracks device location. Disable for privacy unless apps need it.",
-        ["RetailDemo"] = "Retail Demo Service — only for store display PCs. Always safe to disable.",
-        ["wisvc"] = "Windows Insider Service — only needed if in Insider Program.",
-        ["TabletInputService"] = "Touch Keyboard and Handwriting — only needed on touchscreen devices.",
-        ["Fax"] = "Windows Fax — only needed if you send faxes through a modem.",
-        ["XblAuthManager"] = "Xbox Live Auth Manager — only needed for Xbox/Game Pass features.",
-        ["XblGameSave"] = "Xbox Live Game Save — only needed for Xbox cloud saves.",
-        ["XboxGipSvc"] = "Xbox Accessory Management — only needed for Xbox controllers via Xbox app.",
-        ["XboxNetApiSvc"] = "Xbox Live Networking — only needed for Xbox multiplayer.",
-        ["WMPNetworkSvc"] = "Windows Media Player Network Sharing — legacy media sharing. Rarely needed.",
-        ["AxInstSV"] = "ActiveX Installer — legacy IE component. Not needed on modern browsers.",
-        ["RemoteRegistry"] = "Remote Registry — allows remote registry editing. Security risk if enabled.",
-        ["TrkWks"] = "Distributed Link Tracking Client — tracks NTFS links across network. Rarely needed.",
-        ["WerSvc"] = "Windows Error Reporting — sends crash reports to Microsoft.",
-        ["PhoneSvc"] = "Phone Service — manages telephony state. Not needed on desktops.",
+        ["DiagTrack"] = "Experiências do Usuário Conectado e Telemetria — envia dados de diagnóstico à Microsoft. Desativar interrompe essa telemetria, mas pode reduzir informações de diagnóstico.",
+        ["dmwappushservice"] = "Roteamento de mensagens WAP Push — usado principalmente por recursos de telemetria e mensagens do sistema. Normalmente dispensável em PCs pessoais, mas o Optimize deve confirmar o contexto antes de alterar.",
+        ["SysMain"] = "SysMain mantém dados de aplicativos em cache para acelerar carregamentos. O benefício varia conforme RAM, armazenamento e padrão de uso; não deve ser desativado automaticamente só porque o PC usa SSD.",
+        ["WSearch"] = "Windows Search indexa arquivos para acelerar pesquisas. Só faz sentido desativar ou pausar quando o usuário não depende da pesquisa do Explorer/Start ou durante uma sessão temporária e reversível.",
+        ["MapsBroker"] = "Gerenciador de Mapas Baixados — cuida de mapas offline e atualizações relacionadas. Pode ser dispensável quando nenhum recurso de mapas é usado.",
+        ["lfsvc"] = "Serviço de Geolocalização — fornece localização para Windows e aplicativos. Desativar pode aumentar privacidade, mas quebra apps que dependem de localização.",
+        ["RetailDemo"] = "Serviço de Demonstração de Varejo — destinado a computadores de exposição em lojas. Em um PC pessoal comum, normalmente pode ficar desativado.",
+        ["wisvc"] = "Serviço Windows Insider — necessário para recursos do Programa Windows Insider. Não deve ser removido se o PC participa do programa.",
+        ["TabletInputService"] = "Teclado virtual e manuscrito — necessário em dispositivos com toque, caneta ou alguns recursos de acessibilidade. O hardware precisa ser considerado antes de desativar.",
+        ["Fax"] = "Fax do Windows — necessário apenas quando o computador envia/recebe fax por hardware ou integração compatível.",
+        ["XblAuthManager"] = "Gerenciador de autenticação do Xbox Live — usado por recursos Xbox, Game Pass e jogos que dependem desses serviços.",
+        ["XblGameSave"] = "Xbox Live Game Save — usado por jogos com salvamento e sincronização ligados aos serviços Xbox.",
+        ["XboxGipSvc"] = "Gerenciamento de acessórios Xbox — pode ser necessário para controles e acessórios Xbox, dependendo de como estão conectados.",
+        ["XboxNetApiSvc"] = "Rede do Xbox Live — usado por recursos online/multiplayer de jogos e serviços Xbox.",
+        ["WMPNetworkSvc"] = "Compartilhamento de rede do Windows Media Player — recurso legado de compartilhamento de mídia, pouco usado em PCs modernos.",
+        ["AxInstSV"] = "Instalador ActiveX — componente legado ligado a tecnologias antigas. Normalmente não é necessário para navegadores modernos.",
+        ["RemoteRegistry"] = "Registro Remoto — permite alterar o Registro pela rede. Em PCs pessoais costuma ser desnecessário e aumenta a superfície de ataque quando habilitado.",
+        ["TrkWks"] = "Cliente de Rastreamento de Link Distribuído — mantém referências de arquivos NTFS movidos em determinados cenários de rede/domínio. Pouco necessário em uso doméstico.",
+        ["WerSvc"] = "Relatório de Erros do Windows — coleta e envia informações de falhas para ajudar no diagnóstico. Desativar reduz relatórios, mas também pode dificultar análise de problemas.",
+        ["PhoneSvc"] = "Serviço de Telefonia/Telefone — usado por integrações e recursos ligados a chamadas/dispositivos móveis. Pode ser dispensável em muitos desktops.",
     }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     private static readonly FrozenDictionary<string, string> CautionServices = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
-        ["wuauserv"] = "Windows Update — handles updates. Disabling prevents security patches. Only disable temporarily.",
-        ["Spooler"] = "Print Spooler — required for printing. Disable only if you never print.",
-        ["BITS"] = "Background Intelligent Transfer — used by Windows Update and Store. Disabling may break updates.",
-        ["Themes"] = "Themes — provides visual themes. Disabling gives classic look but saves minimal resources.",
-        ["AudioSrv"] = "Windows Audio — disabling removes all sound. Only disable on headless servers.",
-        ["Dhcp"] = "DHCP Client — auto-assigns IP. Disable only with static IP configured.",
-        ["Dnscache"] = "DNS Client — caches DNS lookups. Disabling slows browsing.",
-        ["EventLog"] = "Windows Event Log — disabling prevents all logging. Bad for troubleshooting.",
-        ["LanmanServer"] = "Server — SMB file sharing. Disable if you don't share files on network.",
-        ["LanmanWorkstation"] = "Workstation — SMB client. Disable if you don't access network shares.",
-        ["Schedule"] = "Task Scheduler — many system tasks depend on this. Disabling can break maintenance.",
+        ["wuauserv"] = "Windows Update — gerencia atualizações e correções de segurança. Desativar pode impedir atualizações importantes; no máximo deve ser pausado de forma temporária e consciente.",
+        ["Spooler"] = "Spooler de Impressão — necessário para impressão e para alguns softwares que usam impressoras virtuais. Só desative quando o usuário realmente não utiliza impressão.",
+        ["BITS"] = "Serviço de Transferência Inteligente em Segundo Plano — usado por Windows Update, Microsoft Store e outros componentes. Desativar pode quebrar downloads e atualizações.",
+        ["Themes"] = "Temas — fornece recursos visuais do Windows. Desativar altera a aparência e costuma gerar economia mínima de recursos.",
+        ["AudioSrv"] = "Áudio do Windows — necessário para reprodução e captura de som. Desativar remove o áudio do sistema e não é uma otimização aceitável para um PC comum.",
+        ["Dhcp"] = "Cliente DHCP — obtém automaticamente endereço IP e parâmetros de rede. Só pode ser desativado quando existe configuração de IP estático validada.",
+        ["Dnscache"] = "Cliente DNS — mantém cache de consultas DNS e participa da resolução de nomes. Alterações podem afetar navegação e conectividade.",
+        ["EventLog"] = "Log de Eventos do Windows — essencial para diagnóstico, auditoria e funcionamento de diversos componentes. Desativar prejudica solução de problemas.",
+        ["LanmanServer"] = "Servidor — oferece compartilhamento SMB deste computador para outros dispositivos. Só desative após confirmar que nenhum compartilhamento/recurso depende dele.",
+        ["LanmanWorkstation"] = "Estação de Trabalho — cliente SMB usado para acessar compartilhamentos de rede. Desativar impede acesso normal a pastas e recursos SMB.",
+        ["Schedule"] = "Agendador de Tarefas — muitos componentes do Windows e aplicativos dependem dele. Desativar pode quebrar manutenção, atualizações e tarefas essenciais.",
     }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     private static readonly FrozenDictionary<string, string> CriticalServices = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
-        ["RpcSs"] = "Remote Procedure Call — core Windows IPC. System will not function without it.",
-        ["RpcEptMapper"] = "RPC Endpoint Mapper — required by RPC. Do not disable.",
-        ["DcomLaunch"] = "DCOM Server Process Launcher — core component. Breaking this crashes Windows.",
-        ["LSM"] = "Local Session Manager — manages user sessions. Disabling prevents login.",
-        ["SamSs"] = "Security Accounts Manager — stores security credentials. Critical for authentication.",
-        ["WinDefend"] = "Windows Defender Antivirus — primary security layer. Do not disable without replacement.",
-        ["mpssvc"] = "Windows Defender Firewall — network protection. Disabling exposes all ports.",
-        ["BFE"] = "Base Filtering Engine — core firewall engine. Required by Windows Firewall.",
-        ["CryptSvc"] = "Cryptographic Services — handles certificates, Windows Update signatures. Breaking halts updates.",
-        ["lsass"] = "Local Security Authority — authentication core. Cannot be disabled.",
-        ["Winmgmt"] = "Windows Management Instrumentation — WMI is used by most management tools.",
-        ["PlugPlay"] = "Plug and Play — device detection. Disabling breaks hardware recognition.",
-        ["Power"] = "Power — manages power policy. Disabling causes unpredictable behavior.",
-        ["ProfSvc"] = "User Profile Service — loads user profiles. Disabling prevents login.",
-        ["nsi"] = "Network Store Interface — network connectivity core.",
+        ["RpcSs"] = "Chamada de Procedimento Remoto (RPC) — infraestrutura central de comunicação do Windows. Não desative.",
+        ["RpcEptMapper"] = "Mapeador de Ponto de Extremidade RPC — necessário para RPC e vários componentes do sistema. Não desative.",
+        ["DcomLaunch"] = "Inicializador de Processos de Servidor DCOM — componente central do Windows. Alterá-lo pode impedir o sistema de funcionar corretamente.",
+        ["LSM"] = "Gerenciador de Sessão Local — gerencia sessões de usuário e login. É crítico para o Windows.",
+        ["SamSs"] = "Gerenciador de Contas de Segurança — participa do armazenamento e gerenciamento de informações de segurança/autenticação. Não desative.",
+        ["WinDefend"] = "Microsoft Defender Antivirus — camada principal de proteção antimalware do Windows. O Optimize não deve desativá-lo como 'otimização'.",
+        ["mpssvc"] = "Firewall do Microsoft Defender — proteção de rede do Windows. Desativá-lo expõe o computador e não é uma otimização aceitável.",
+        ["BFE"] = "Mecanismo de Filtragem Base — núcleo usado pelo Firewall e filtros de rede. É um serviço crítico.",
+        ["CryptSvc"] = "Serviços de Criptografia — cuida de certificados, assinaturas e partes do Windows Update. Alterações podem quebrar atualizações e validações de segurança.",
+        ["lsass"] = "Autoridade de Segurança Local — núcleo de autenticação e segurança do Windows. Não deve ser alterado ou encerrado.",
+        ["Winmgmt"] = "Instrumentação de Gerenciamento do Windows (WMI) — usada pelo próprio Optimize e por diversas ferramentas do sistema. Não desative.",
+        ["PlugPlay"] = "Plug and Play — detecta e gerencia dispositivos. Desativar quebra reconhecimento e funcionamento de hardware.",
+        ["Power"] = "Energia — gerencia políticas e eventos de energia. Alterações indevidas podem causar comportamento imprevisível.",
+        ["ProfSvc"] = "Serviço de Perfil de Usuário — carrega perfis de usuário. Desativar pode impedir login e acesso correto ao perfil.",
+        ["nsi"] = "Interface de Armazenamento de Rede — componente central da conectividade de rede do Windows. Não desative.",
     }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     private static readonly FrozenDictionary<string, string> SafeFeatures = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
-        ["Internet-Explorer-Optional-amd64"] = "Legacy IE compatibility in Edge. Not needed unless you use old enterprise sites.",
-        ["MediaPlayback"] = "Windows Media Player legacy — replaced by modern Media Player app.",
-        ["WindowsMediaPlayer"] = "Windows Media Player legacy codec pack. Modern apps don't need it.",
-        ["Printing-XPSServices-Features"] = "XPS Document Writer — rarely used virtual printer.",
-        ["Printing-PrintToPDFServices-Features"] = "Microsoft Print to PDF — useful but can reinstall if needed.",
-        ["WorkFolders-Client"] = "Work Folders — enterprise file sync. Not needed for personal use.",
-        ["MicrosoftWindowsPowerShellV2Root"] = "PowerShell 2.0 — legacy version, security risk. Use PowerShell 7+.",
-        ["MicrosoftWindowsPowerShellV2"] = "PowerShell 2.0 Engine — legacy, unnecessary with modern PS.",
-        ["MSRDC-Infrastructure"] = "Remote Desktop Client — only needed if you RDP into other machines.",
-        ["TelnetClient"] = "Telnet Client — insecure protocol. Use SSH instead.",
-        ["TFTP"] = "TFTP Client — trivial file transfer. Rarely needed.",
-        ["DirectPlay"] = "DirectPlay — legacy gaming API. Only needed for very old games.",
-        ["SimpleTCP"] = "Simple TCP/IP Services — echo, daytime servers. Never needed on workstations.",
-        ["SMB1Protocol"] = "SMB 1.0 — insecure file sharing protocol. Disable unless connecting to ancient NAS.",
+        ["Internet-Explorer-Optional-amd64"] = "Compatibilidade legada do Internet Explorer/Edge. Pode ser dispensável, exceto quando sites corporativos antigos dependem desse modo.",
+        ["MediaPlayback"] = "Recursos legados de reprodução de mídia. Alguns programas antigos podem depender deles; confirme o uso antes de remover.",
+        ["WindowsMediaPlayer"] = "Componentes legados do Windows Media Player. Aplicativos antigos ou codecs específicos podem depender deles.",
+        ["Printing-XPSServices-Features"] = "Microsoft XPS Document Writer — impressora virtual pouco usada, mas necessária em alguns fluxos de documentos XPS.",
+        ["Printing-PrintToPDFServices-Features"] = "Microsoft Print to PDF — impressora virtual útil para salvar documentos como PDF. Remover economiza pouco e pode reduzir funcionalidade.",
+        ["WorkFolders-Client"] = "Pastas de Trabalho — sincronização corporativa de arquivos. Normalmente dispensável fora de ambientes empresariais que usam o recurso.",
+        ["MicrosoftWindowsPowerShellV2Root"] = "PowerShell 2.0 — versão legada e insegura. Softwares corporativos muito antigos podem depender dela, mas em sistemas modernos é preferível manter versões atuais.",
+        ["MicrosoftWindowsPowerShellV2"] = "Mecanismo PowerShell 2.0 — tecnologia legada. Remover reduz superfície de ataque quando nenhum software antigo depende dela.",
+        ["MSRDC-Infrastructure"] = "Infraestrutura de cliente de Área de Trabalho Remota — necessária para determinados cenários de conexão remota.",
+        ["TelnetClient"] = "Cliente Telnet — protocolo legado sem criptografia. Só mantenha se existir necessidade específica; SSH é preferível.",
+        ["TFTP"] = "Cliente TFTP — transferência simples de arquivos usada em equipamentos/rede específicos. Pouco necessária em PCs comuns.",
+        ["DirectPlay"] = "DirectPlay — API legada de jogos, necessária para alguns títulos antigos. Não remova se o usuário joga títulos que dependem dela.",
+        ["SimpleTCP"] = "Serviços TCP/IP simples — recursos legados como echo/daytime. Raramente necessários em estações de trabalho.",
+        ["SMB1Protocol"] = "SMB 1.0 — protocolo antigo e inseguro. Deve permanecer desativado salvo quando um equipamento legado indispensável exige SMB1.",
     }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     private static readonly FrozenDictionary<string, string> CautionFeatures = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
-        ["NetFx4-AdvSrvs"] = ".NET Framework 4.x Advanced Services — some apps depend on this.",
-        ["NetFx3"] = ".NET Framework 3.5 — needed by some older applications.",
-        ["SearchEngine-Client-Package"] = "Windows Search — disabling removes Start menu and Explorer search.",
-        ["Printing-Foundation-Features"] = "Print and Document Services — needed for any printing.",
-        ["SmbDirect"] = "SMB Direct (RDMA) — high-speed file transfer. Only needed with RDMA NICs.",
-        ["WCF-Services45"] = "WCF Services — .NET communication framework. Some enterprise apps need it.",
-        ["Microsoft-Windows-Subsystem-Linux"] = "WSL — Windows Subsystem for Linux. Needed by developers using Linux tools.",
+        ["NetFx4-AdvSrvs"] = ".NET Framework 4.x Advanced Services — alguns programas dependem desses componentes. Não remova sem validar os aplicativos instalados.",
+        ["NetFx3"] = ".NET Framework 3.5 — necessário para vários programas e jogos mais antigos. Remover pode impedir que eles abram.",
+        ["SearchEngine-Client-Package"] = "Windows Search — fornece pesquisa no menu Iniciar e Explorer. Desativar remove ou degrada esses recursos.",
+        ["Printing-Foundation-Features"] = "Serviços de Impressão e Documentos — necessários para impressão física e várias impressoras virtuais.",
+        ["SmbDirect"] = "SMB Direct (RDMA) — transferência de arquivos de alto desempenho em hardware de rede compatível. Só é dispensável quando não existe uso de RDMA.",
+        ["WCF-Services45"] = "Serviços WCF — infraestrutura de comunicação do .NET usada por alguns aplicativos corporativos. Remover pode quebrar esses programas.",
+        ["Microsoft-Windows-Subsystem-Linux"] = "Subsistema do Windows para Linux (WSL) — necessário para usuários e ferramentas que executam ambientes Linux no Windows.",
     }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     private static readonly FrozenDictionary<string, string> CriticalFeatures = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
-        ["Microsoft-Hyper-V-All"] = "Hyper-V — virtualization platform. Required by Docker, WSL2, Android Emulator.",
-        ["Microsoft-Hyper-V"] = "Hyper-V core. Disabling breaks all VM-based tools.",
-        ["VirtualMachinePlatform"] = "Virtual Machine Platform — required by WSL2 and Hyper-V.",
-        ["HypervisorPlatform"] = "Windows Hypervisor Platform — needed by third-party VMs (VirtualBox, etc).",
-        ["Containers"] = "Windows Containers — used by Docker. Disabling breaks container workloads.",
-        ["Microsoft-Windows-Client-EmbeddedExp-Package"] = "Windows Sandbox — isolated test environment. Useful for security.",
+        ["Microsoft-Hyper-V-All"] = "Hyper-V — plataforma de virtualização usada por VMs e ferramentas como Docker/WSL2 em determinadas configurações. Não desative sem entender as dependências deste PC.",
+        ["Microsoft-Hyper-V"] = "Núcleo do Hyper-V — desativar interrompe workloads e ferramentas que dependem do hipervisor.",
+        ["VirtualMachinePlatform"] = "Plataforma de Máquina Virtual — necessária para WSL2 e outros recursos de virtualização do Windows.",
+        ["HypervisorPlatform"] = "Plataforma do Hipervisor do Windows — usada por virtualizadores e ferramentas de terceiros. Desativar pode quebrar VMs/emuladores.",
+        ["Containers"] = "Contêineres do Windows — usados por Docker e workloads de contêiner. Desativar quebra esses cenários quando estão em uso.",
+        ["Microsoft-Windows-Client-EmbeddedExp-Package"] = "Windows Sandbox — ambiente isolado de testes e segurança. Remover elimina esse recurso quando ele é utilizado.",
     }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 }
