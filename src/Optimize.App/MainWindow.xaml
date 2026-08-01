@@ -41,37 +41,25 @@
                             <TextBlock Text="PC INSPECTION" FontSize="9" Foreground="{StaticResource TextMutedBrush}" />
                         </StackPanel>
                     </StackPanel>
-                    <TextBlock Text="{Binding ComputerName}"
+                    <TextBlock Text="{Binding ComputerName, Mode=OneWay}"
                                Margin="0,15,0,0"
                                FontSize="11"
                                Foreground="{StaticResource TextMutedBrush}" />
                 </StackPanel>
 
                 <StackPanel Grid.Row="2">
-                    <Button Content="Visão geral"
-                            Style="{StaticResource NavButtonStyle}"
-                            Command="{Binding NavigateCommand}"
-                            CommandParameter="overview" />
-                    <Button Content="Hardware"
-                            Style="{StaticResource NavButtonStyle}"
-                            Command="{Binding NavigateCommand}"
-                            CommandParameter="hardware" />
-                    <Button Content="Armazenamento"
-                            Style="{StaticResource NavButtonStyle}"
-                            Command="{Binding NavigateCommand}"
-                            CommandParameter="storage" />
-                    <Button Content="Inicialização"
-                            Style="{StaticResource NavButtonStyle}"
-                            Command="{Binding NavigateCommand}"
-                            CommandParameter="startup" />
-                    <Button Content="Atualizações"
-                            Style="{StaticResource NavButtonStyle}"
-                            Command="{Binding NavigateCommand}"
-                            CommandParameter="updates" />
-                    <Button Content="Otimizações"
-                            Style="{StaticResource NavButtonStyle}"
-                            Command="{Binding NavigateCommand}"
-                            CommandParameter="optimizations" />
+                    <Button Content="Visão geral" Style="{StaticResource NavButtonStyle}"
+                            Command="{Binding NavigateCommand}" CommandParameter="overview" />
+                    <Button Content="Hardware" Style="{StaticResource NavButtonStyle}"
+                            Command="{Binding NavigateCommand}" CommandParameter="hardware" />
+                    <Button Content="Armazenamento" Style="{StaticResource NavButtonStyle}"
+                            Command="{Binding NavigateCommand}" CommandParameter="storage" />
+                    <Button Content="Inicialização" Style="{StaticResource NavButtonStyle}"
+                            Command="{Binding NavigateCommand}" CommandParameter="startup" />
+                    <Button Content="Atualizações" Style="{StaticResource NavButtonStyle}"
+                            Command="{Binding NavigateCommand}" CommandParameter="updates" />
+                    <Button Content="Otimizações" Style="{StaticResource NavButtonStyle}"
+                            Command="{Binding NavigateCommand}" CommandParameter="optimizations" />
                 </StackPanel>
 
                 <Border Grid.Row="4"
@@ -113,14 +101,14 @@
                     </Grid.ColumnDefinitions>
 
                     <StackPanel VerticalAlignment="Center">
-                        <TextBlock Text="{Binding CurrentPageTitle}"
+                        <TextBlock Text="{Binding CurrentPageTitle, Mode=OneWay}"
                                    FontFamily="Segoe UI Semibold"
                                    FontSize="27" />
-                        <TextBlock Text="{Binding CurrentPageSubtitle}"
+                        <TextBlock Text="{Binding CurrentPageSubtitle, Mode=OneWay}"
                                    Margin="0,6,0,0"
                                    Foreground="{StaticResource TextSecondaryBrush}"
                                    FontSize="13" />
-                        <TextBlock Text="{Binding LastScanText}"
+                        <TextBlock Text="{Binding LastScanText, Mode=OneWay}"
                                    Margin="0,5,0,0"
                                    Foreground="{StaticResource TextMutedBrush}"
                                    FontSize="11" />
@@ -128,7 +116,7 @@
 
                     <Button Grid.Column="1"
                             Command="{Binding ScanCommand}"
-                            Content="{Binding ScanButtonText}"
+                            Content="{Binding ScanButtonText, Mode=OneWay}"
                             Style="{StaticResource PrimaryButtonStyle}"
                             MinWidth="150"
                             VerticalAlignment="Center" />
@@ -139,50 +127,42 @@
                           VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled">
                 <Grid Margin="32,26,32,36">
-                    <StackPanel Visibility="{Binding IsOverviewVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel Visibility="{Binding IsOverviewVisible, Mode=OneWay, Converter={StaticResource BooleanToVisibilityConverter}}">
                         <UniformGrid Columns="3">
                             <Border Style="{StaticResource CardStyle}" Margin="0,0,10,0">
                                 <StackPanel>
                                     <TextBlock Text="NOTA DO PC" FontSize="10" Foreground="{StaticResource TextMutedBrush}" />
-                                    <TextBlock Text="{Binding Score}" Margin="0,10,0,0" FontFamily="Segoe UI Semibold" FontSize="38" />
-                                    <TextBlock Text="{Binding HealthLabel}" Margin="0,3,0,0" FontFamily="Segoe UI Semibold" FontSize="18" />
-                                    <TextBlock Text="Pontuação inicial baseada em espaço, memória, inicialização e estado do Windows."
-                                               Margin="0,8,0,0"
-                                               TextWrapping="Wrap"
-                                               Foreground="{StaticResource TextSecondaryBrush}"
-                                               FontSize="12" />
+                                    <TextBlock Text="{Binding Score, Mode=OneWay}" Margin="0,10,0,0" FontFamily="Segoe UI Semibold" FontSize="38" />
+                                    <TextBlock Text="{Binding HealthLabel, Mode=OneWay}" Margin="0,3,0,0" FontFamily="Segoe UI Semibold" FontSize="18" />
+                                    <TextBlock Text="Pontuação baseada em espaço, memória, inicialização e estado do Windows."
+                                               Margin="0,8,0,0" TextWrapping="Wrap"
+                                               Foreground="{StaticResource TextSecondaryBrush}" FontSize="12" />
                                 </StackPanel>
                             </Border>
 
                             <Border Style="{StaticResource CardStyle}" Margin="5,0">
                                 <StackPanel>
                                     <TextBlock Text="MEMÓRIA" FontSize="10" Foreground="{StaticResource TextMutedBrush}" />
-                                    <TextBlock Text="{Binding MemoryUsagePercent, StringFormat={}{0:0}%}"
+                                    <TextBlock Text="{Binding MemoryUsagePercent, Mode=OneWay, StringFormat={}{0:0}%}"
+                                               Margin="0,10,0,0" FontFamily="Segoe UI Semibold" FontSize="32" />
+                                    <TextBlock Text="{Binding MemorySummary, Mode=OneWay}" Margin="0,6,0,0" TextWrapping="Wrap" />
+                                    <ProgressBar Value="{Binding MemoryUsagePercent, Mode=OneWay}"
+                                                 Maximum="100" Height="8" Margin="0,14,0,0" />
+                                    <TextBlock Text="{Binding ProcessSummary, Mode=OneWay}"
                                                Margin="0,10,0,0"
-                                               FontFamily="Segoe UI Semibold"
-                                               FontSize="32" />
-                                    <TextBlock Text="{Binding MemorySummary}" Margin="0,6,0,0" TextWrapping="Wrap" />
-                                    <ProgressBar Value="{Binding MemoryUsagePercent}" Maximum="100" Height="8" Margin="0,14,0,0" />
-                                    <TextBlock Text="{Binding ProcessSummary}"
-                                               Margin="0,10,0,0"
-                                               Foreground="{StaticResource TextSecondaryBrush}"
-                                               FontSize="12" />
+                                               Foreground="{StaticResource TextSecondaryBrush}" FontSize="12" />
                                 </StackPanel>
                             </Border>
 
                             <Border Style="{StaticResource CardStyle}" Margin="10,0,0,0">
                                 <StackPanel>
                                     <TextBlock Text="INICIALIZAÇÃO" FontSize="10" Foreground="{StaticResource TextMutedBrush}" />
-                                    <TextBlock Text="{Binding StartupItemCount}"
-                                               Margin="0,10,0,0"
-                                               FontFamily="Segoe UI Semibold"
-                                               FontSize="32" />
+                                    <TextBlock Text="{Binding StartupItemCount, Mode=OneWay}"
+                                               Margin="0,10,0,0" FontFamily="Segoe UI Semibold" FontSize="32" />
                                     <TextBlock Text="entradas detectadas" Foreground="{StaticResource TextSecondaryBrush}" />
-                                    <TextBlock Text="{Binding UptimeSummary}"
-                                               Margin="0,13,0,0"
-                                               TextWrapping="Wrap"
-                                               Foreground="{StaticResource TextSecondaryBrush}"
-                                               FontSize="12" />
+                                    <TextBlock Text="{Binding UptimeSummary, Mode=OneWay}"
+                                               Margin="0,13,0,0" TextWrapping="Wrap"
+                                               Foreground="{StaticResource TextSecondaryBrush}" FontSize="12" />
                                 </StackPanel>
                             </Border>
                         </UniformGrid>
@@ -200,13 +180,13 @@
                                     <Border Margin="0,16,0,0" Background="{StaticResource SurfaceRaisedBrush}" CornerRadius="10" Padding="14">
                                         <StackPanel>
                                             <TextBlock Text="PROCESSADOR" FontSize="9" Foreground="{StaticResource TextMutedBrush}" />
-                                            <TextBlock Text="{Binding Processor}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                                            <TextBlock Text="{Binding Processor, Mode=OneWay}" Margin="0,5,0,0" TextWrapping="Wrap" />
                                         </StackPanel>
                                     </Border>
                                     <Border Margin="0,10,0,0" Background="{StaticResource SurfaceRaisedBrush}" CornerRadius="10" Padding="14">
                                         <StackPanel>
                                             <TextBlock Text="PLACA DE VÍDEO" FontSize="9" Foreground="{StaticResource TextMutedBrush}" />
-                                            <TextBlock Text="{Binding GraphicsAdapter}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                                            <TextBlock Text="{Binding GraphicsAdapter, Mode=OneWay}" Margin="0,5,0,0" TextWrapping="Wrap" />
                                         </StackPanel>
                                     </Border>
                                 </StackPanel>
@@ -215,22 +195,22 @@
                             <Border Grid.Column="2" Style="{StaticResource CardStyle}">
                                 <StackPanel>
                                     <TextBlock Text="Armazenamento" FontFamily="Segoe UI Semibold" FontSize="18" />
-                                    <ItemsControl ItemsSource="{Binding Drives}" Margin="0,14,0,0">
+                                    <ItemsControl ItemsSource="{Binding Drives, Mode=OneWay}" Margin="0,14,0,0">
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
                                                 <Border Background="{StaticResource SurfaceRaisedBrush}" CornerRadius="10" Padding="13" Margin="0,0,0,9">
                                                     <StackPanel>
                                                         <TextBlock FontFamily="Segoe UI Semibold">
-                                                            <Run Text="{Binding Name}" />
+                                                            <Run Text="{Binding Name, Mode=OneWay}" />
                                                             <Run Text="  " />
-                                                            <Run Text="{Binding Label}" />
+                                                            <Run Text="{Binding Label, Mode=OneWay}" />
                                                         </TextBlock>
                                                         <TextBlock Margin="0,6,0,0" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11">
-                                                            <Run Text="{Binding FreeGb}" />
+                                                            <Run Text="{Binding FreeGb, Mode=OneWay}" />
                                                             <Run Text=" GB livres de " />
-                                                            <Run Text="{Binding TotalGb}" />
+                                                            <Run Text="{Binding TotalGb, Mode=OneWay}" />
                                                             <Run Text=" GB · " />
-                                                            <Run Text="{Binding FreePercent}" />
+                                                            <Run Text="{Binding FreePercent, Mode=OneWay}" />
                                                             <Run Text="% livre" />
                                                         </TextBlock>
                                                     </StackPanel>
@@ -246,24 +226,20 @@
                             <StackPanel>
                                 <Grid>
                                     <TextBlock Text="Pontos encontrados" FontFamily="Segoe UI Semibold" FontSize="18" />
-                                    <TextBlock Text="{Binding StatusText}"
-                                               HorizontalAlignment="Right"
-                                               MaxWidth="420"
+                                    <TextBlock Text="{Binding StatusText, Mode=OneWay}"
+                                               HorizontalAlignment="Right" MaxWidth="420"
                                                TextTrimming="CharacterEllipsis"
-                                               Foreground="{StaticResource TextSecondaryBrush}"
-                                               FontSize="11" />
+                                               Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" />
                                 </Grid>
-                                <ItemsControl ItemsSource="{Binding Recommendations}" Margin="0,15,0,0">
+                                <ItemsControl ItemsSource="{Binding Recommendations, Mode=OneWay}" Margin="0,15,0,0">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
                                             <Border Background="{StaticResource SurfaceRaisedBrush}" CornerRadius="10" Padding="14" Margin="0,0,0,9">
                                                 <StackPanel>
-                                                    <TextBlock Text="{Binding Title}" FontFamily="Segoe UI Semibold" FontSize="14" />
-                                                    <TextBlock Text="{Binding Description}"
-                                                               Margin="0,5,0,0"
-                                                               TextWrapping="Wrap"
-                                                               Foreground="{StaticResource TextSecondaryBrush}"
-                                                               LineHeight="18" />
+                                                    <TextBlock Text="{Binding Title, Mode=OneWay}" FontFamily="Segoe UI Semibold" FontSize="14" />
+                                                    <TextBlock Text="{Binding Description, Mode=OneWay}"
+                                                               Margin="0,5,0,0" TextWrapping="Wrap"
+                                                               Foreground="{StaticResource TextSecondaryBrush}" LineHeight="18" />
                                                 </StackPanel>
                                             </Border>
                                         </DataTemplate>
@@ -273,30 +249,31 @@
                         </Border>
                     </StackPanel>
 
-                    <StackPanel Visibility="{Binding IsHardwareVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel Visibility="{Binding IsHardwareVisible, Mode=OneWay, Converter={StaticResource BooleanToVisibilityConverter}}">
                         <Border Style="{StaticResource CardStyle}">
                             <StackPanel>
                                 <TextBlock Text="Processador" FontSize="11" Foreground="{StaticResource TextMutedBrush}" />
-                                <TextBlock Text="{Binding Processor}" Margin="0,8,0,0" FontFamily="Segoe UI Semibold" FontSize="18" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding Processor, Mode=OneWay}" Margin="0,8,0,0" FontFamily="Segoe UI Semibold" FontSize="18" TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
                         <Border Margin="0,16,0,0" Style="{StaticResource CardStyle}">
                             <StackPanel>
                                 <TextBlock Text="Adaptador gráfico" FontSize="11" Foreground="{StaticResource TextMutedBrush}" />
-                                <TextBlock Text="{Binding GraphicsAdapter}" Margin="0,8,0,0" FontFamily="Segoe UI Semibold" FontSize="18" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding GraphicsAdapter, Mode=OneWay}" Margin="0,8,0,0" FontFamily="Segoe UI Semibold" FontSize="18" TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
                         <Border Margin="0,16,0,0" Style="{StaticResource CardStyle}">
                             <StackPanel>
                                 <TextBlock Text="Memória física" FontSize="11" Foreground="{StaticResource TextMutedBrush}" />
-                                <TextBlock Text="{Binding MemorySummary}" Margin="0,8,0,0" FontFamily="Segoe UI Semibold" FontSize="18" />
-                                <ProgressBar Value="{Binding MemoryUsagePercent}" Maximum="100" Height="10" Margin="0,16,0,0" />
+                                <TextBlock Text="{Binding MemorySummary, Mode=OneWay}" Margin="0,8,0,0" FontFamily="Segoe UI Semibold" FontSize="18" />
+                                <ProgressBar Value="{Binding MemoryUsagePercent, Mode=OneWay}"
+                                             Maximum="100" Height="10" Margin="0,16,0,0" />
                             </StackPanel>
                         </Border>
                     </StackPanel>
 
-                    <StackPanel Visibility="{Binding IsStorageVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
-                        <ItemsControl ItemsSource="{Binding Drives}">
+                    <StackPanel Visibility="{Binding IsStorageVisible, Mode=OneWay, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <ItemsControl ItemsSource="{Binding Drives, Mode=OneWay}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
                                     <Border Style="{StaticResource CardStyle}" Margin="0,0,0,14">
@@ -307,22 +284,24 @@
                                             </Grid.ColumnDefinitions>
                                             <StackPanel>
                                                 <TextBlock FontFamily="Segoe UI Semibold" FontSize="20">
-                                                    <Run Text="{Binding Name}" />
+                                                    <Run Text="{Binding Name, Mode=OneWay}" />
                                                     <Run Text="  " />
-                                                    <Run Text="{Binding Label}" />
+                                                    <Run Text="{Binding Label, Mode=OneWay}" />
                                                 </TextBlock>
                                                 <TextBlock Margin="0,8,0,0" Foreground="{StaticResource TextSecondaryBrush}">
                                                     <Run Text="Sistema de arquivos: " />
-                                                    <Run Text="{Binding FileSystem}" />
+                                                    <Run Text="{Binding FileSystem, Mode=OneWay}" />
                                                 </TextBlock>
-                                                <ProgressBar Value="{Binding FreePercent}" Maximum="100" Height="10" Margin="0,16,0,0" />
+                                                <ProgressBar Value="{Binding FreePercent, Mode=OneWay}"
+                                                             Maximum="100" Height="10" Margin="0,16,0,0" />
                                             </StackPanel>
                                             <StackPanel Grid.Column="1" Margin="26,0,0,0" HorizontalAlignment="Right">
-                                                <TextBlock Text="{Binding FreePercent, StringFormat={}{0:0}% livre}" FontFamily="Segoe UI Semibold" FontSize="23" HorizontalAlignment="Right" />
+                                                <TextBlock Text="{Binding FreePercent, Mode=OneWay, StringFormat={}{0:0}% livre}"
+                                                           FontFamily="Segoe UI Semibold" FontSize="23" HorizontalAlignment="Right" />
                                                 <TextBlock HorizontalAlignment="Right" Margin="0,7,0,0" Foreground="{StaticResource TextSecondaryBrush}">
-                                                    <Run Text="{Binding FreeGb}" />
+                                                    <Run Text="{Binding FreeGb, Mode=OneWay}" />
                                                     <Run Text=" GB de " />
-                                                    <Run Text="{Binding TotalGb}" />
+                                                    <Run Text="{Binding TotalGb, Mode=OneWay}" />
                                                     <Run Text=" GB" />
                                                 </TextBlock>
                                             </StackPanel>
@@ -333,53 +312,49 @@
                         </ItemsControl>
                     </StackPanel>
 
-                    <StackPanel Visibility="{Binding IsStartupVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel Visibility="{Binding IsStartupVisible, Mode=OneWay, Converter={StaticResource BooleanToVisibilityConverter}}">
                         <UniformGrid Columns="2">
                             <Border Style="{StaticResource CardStyle}" Margin="0,0,8,0">
                                 <StackPanel>
                                     <TextBlock Text="Entradas detectadas" Foreground="{StaticResource TextMutedBrush}" />
-                                    <TextBlock Text="{Binding StartupItemCount}" Margin="0,9,0,0" FontFamily="Segoe UI Semibold" FontSize="42" />
-                                    <TextBlock Text="{Binding StartupSummary}" Foreground="{StaticResource TextSecondaryBrush}" />
+                                    <TextBlock Text="{Binding StartupItemCount, Mode=OneWay}" Margin="0,9,0,0" FontFamily="Segoe UI Semibold" FontSize="42" />
+                                    <TextBlock Text="{Binding StartupSummary, Mode=OneWay}" Foreground="{StaticResource TextSecondaryBrush}" />
                                 </StackPanel>
                             </Border>
                             <Border Style="{StaticResource CardStyle}" Margin="8,0,0,0">
                                 <StackPanel>
                                     <TextBlock Text="Tempo ligado" Foreground="{StaticResource TextMutedBrush}" />
-                                    <TextBlock Text="{Binding UptimeSummary}" Margin="0,12,0,0" FontFamily="Segoe UI Semibold" FontSize="19" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding UptimeSummary, Mode=OneWay}" Margin="0,12,0,0" FontFamily="Segoe UI Semibold" FontSize="19" TextWrapping="Wrap" />
                                 </StackPanel>
                             </Border>
                         </UniformGrid>
                         <Border Margin="0,16,0,0" Style="{StaticResource CardStyle}">
                             <TextBlock Text="A próxima etapa mostrará cada programa de inicialização com impacto, fabricante e opção segura para desativar."
-                                       TextWrapping="Wrap"
-                                       Foreground="{StaticResource TextSecondaryBrush}" />
+                                       TextWrapping="Wrap" Foreground="{StaticResource TextSecondaryBrush}" />
                         </Border>
                     </StackPanel>
 
-                    <StackPanel Visibility="{Binding IsUpdatesVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel Visibility="{Binding IsUpdatesVisible, Mode=OneWay, Converter={StaticResource BooleanToVisibilityConverter}}">
                         <Border Style="{StaticResource CardStyle}">
                             <StackPanel>
                                 <TextBlock Text="Estado do Windows" FontFamily="Segoe UI Semibold" FontSize="19" />
-                                <TextBlock Text="{Binding SystemSummary}" Margin="0,10,0,0" TextWrapping="Wrap" />
-                                <TextBlock Text="{Binding RestartSummary}" Margin="0,10,0,0" Foreground="{StaticResource TextSecondaryBrush}" />
+                                <TextBlock Text="{Binding SystemSummary, Mode=OneWay}" Margin="0,10,0,0" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding RestartSummary, Mode=OneWay}" Margin="0,10,0,0" Foreground="{StaticResource TextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
                         <Border Margin="0,16,0,0" Style="{StaticResource CardStyle}">
                             <TextBlock Text="A leitura de Windows Update, WinGet e versões de drivers será adicionada sem instalar nada automaticamente."
-                                       TextWrapping="Wrap"
-                                       Foreground="{StaticResource TextSecondaryBrush}" />
+                                       TextWrapping="Wrap" Foreground="{StaticResource TextSecondaryBrush}" />
                         </Border>
                     </StackPanel>
 
-                    <StackPanel Visibility="{Binding IsOptimizationsVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel Visibility="{Binding IsOptimizationsVisible, Mode=OneWay, Converter={StaticResource BooleanToVisibilityConverter}}">
                         <Border Style="{StaticResource CardStyle}">
                             <StackPanel>
                                 <TextBlock Text="Otimizações bloqueadas nesta prévia" FontFamily="Segoe UI Semibold" FontSize="20" />
                                 <TextBlock Text="Antes de habilitar qualquer mudança, vamos implementar ponto de restauração, registro de cada ação e botão de desfazer."
-                                           Margin="0,10,0,0"
-                                           TextWrapping="Wrap"
-                                           Foreground="{StaticResource TextSecondaryBrush}"
-                                           LineHeight="20" />
+                                           Margin="0,10,0,0" TextWrapping="Wrap"
+                                           Foreground="{StaticResource TextSecondaryBrush}" LineHeight="20" />
                             </StackPanel>
                         </Border>
                         <UniformGrid Columns="3" Margin="0,16,0,0">
