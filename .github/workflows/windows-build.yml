@@ -37,15 +37,21 @@ jobs:
           --configuration Release
           --runtime win-x64
           --self-contained true
-          -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
-          -p:EnableCompressionInSingleFile=true
+          -p:PublishSingleFile=false
           -p:DebugType=None
           -p:DebugSymbols=false
 
-      - name: Upload portable build
+      - name: Verify executable exists
+        shell: pwsh
+        run: |
+          $exe = "src/Optimize.App/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish/Optimize.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Optimize.exe was not generated."
+          }
+
+      - name: Upload recovery build
         uses: actions/upload-artifact@v4
         with:
-          name: Optimize-win-x64-self-contained
+          name: Optimize-v0.2.1-recovery-win-x64
           path: src/Optimize.App/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish/
           if-no-files-found: error
