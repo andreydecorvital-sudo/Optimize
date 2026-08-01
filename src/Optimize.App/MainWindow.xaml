@@ -30,8 +30,7 @@
                 <StackPanel>
                     <TextBlock Text="OPTIMIZE"
                                FontFamily="Segoe UI Semibold"
-                               FontSize="25"
-                               LetterSpacing="3" />
+                               FontSize="25" />
                     <TextBlock Text="PC INSPECTION"
                                Margin="1,3,0,0"
                                Foreground="{StaticResource TextSecondaryBrush}"
