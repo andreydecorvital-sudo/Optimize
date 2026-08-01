@@ -1,0 +1,49 @@
+name: Windows build
+
+on:
+  push:
+    branches:
+      - main
+      - "agent/**"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore Optimize.sln
+
+      - name: Build
+        run: dotnet build Optimize.sln --configuration Release --no-restore
+
+      - name: Publish Windows x64
+        run: >-
+          dotnet publish src/Optimize.App/Optimize.App.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained false
+          -p:PublishSingleFile=true
+          -p:DebugType=None
+          -p:DebugSymbols=false
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Optimize-win-x64
+          path: src/Optimize.App/bin/Release/net8.0-windows/win-x64/publish/
+          if-no-files-found: error
