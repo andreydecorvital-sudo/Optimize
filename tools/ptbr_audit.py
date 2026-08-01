@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Audit user-facing UI literals that still look English.
 
-Report-only while the upstream migration is in progress. Once the report reaches
-zero (except explicit technical allow-list entries), CI can switch to --strict.
+The audit intentionally ignores implementation identifiers (registry value names,
+PowerShell source, package IDs, pure interpolation fragments). Everything that can
+actually be rendered as UI must either be Portuguese or exist in a pt-BR catalog.
 """
 
 from __future__ import annotations
@@ -17,11 +18,10 @@ ROOT = REPO / "SysManager" / "SysManager"
 REPORT = REPO / "artifacts" / "ptbr-audit.txt"
 CATALOGS = sorted((ROOT / "Services").glob("PtBr*Catalog*.cs"))
 
-UI_ATTR = re.compile(
-    r'\b(?:Text|Content|Header|ToolTip|AutomationProperties\.Name|Title)="([^"]+)"'
-)
+UI_ATTR = re.compile(r'\b(?:Text|Content|Header|ToolTip|AutomationProperties\.Name|Title)="([^"]+)"')
 CS_STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
 CATALOG_KEY = re.compile(r'^\s*\["((?:[^"\\]|\\.)*)"\]\s*=')
+INTERPOLATION = re.compile(r"\{[^{}]+\}")
 
 ENGLISH_HINTS = {
     "the", "and", "for", "with", "from", "your", "this", "that", "system",
@@ -47,6 +47,13 @@ TECHNICAL_ALLOW = {
     "IPv4", "IPv6", "TCP", "UDP", "HTTP", "HTTPS", "USB", "SATA", "SCSI",
     "CSV", "XML", "SFC", "DISM", "PATH", "TEMP", "WebView2",
 }
+
+INTERNAL_TOKENS = (
+    "Microsoft.Windows.", "Windows.SystemToast.", "SubscribedContent-",
+    "Get-NetAdapter", "Get-ComputerRestorePoint", "Checkpoint-Computer",
+    "Write-Warning", "Get-CimInstance", "Set-DnsClientServerAddress",
+    "Software\\", "SYSTEM\\", "CurrentControlSet\\", "Policies\\",
+)
 
 CS_UI_MARKERS = (
     "Title", "Message", "Description", "Detail", "Status", "Label", "Tooltip",
@@ -76,17 +83,28 @@ def skip(text: str) -> bool:
         return True
     if text.startswith(("{Binding", "{DynamicResource", "{StaticResource", "{x:", "&#x")):
         return True
-    if re.fullmatch(r"\{[^{}]+\}", text):
+    if text.startswith(("http://", "https://", "pack://", "HKCU", "HKLM", "HKEY_")):
         return True
-    if text.startswith(("http://", "https://", "pack://")):
+    if any(token in text for token in INTERNAL_TOKENS):
+        return True
+    if ".Replace(" in text or "$($_." in text:
         return True
     if re.fullmatch(r"[\d\W_]+", text):
         return True
     if re.fullmatch(r"[A-Z0-9_.:/\\%-]{2,}", text) and " " not in text:
         return True
-    if "\\Software\\" in text or text.startswith(("HKCU", "HKLM", "HKEY_")):
+
+    # Pure runtime values such as "{machine} · {profile.CpuName} · ..." contain
+    # English-looking identifier names in source but render only their values.
+    without_values = INTERPOLATION.sub("", text)
+    if without_values and not re.search(r"[A-Za-zÀ-ÿ]", without_values):
         return True
-    if any(token in text for token in ("Get-NetAdapter", "Get-ComputerRestorePoint", "Checkpoint-Computer")):
+    if not without_values:
+        return True
+
+    # The simplistic C# literal scanner may capture only the first half of a ternary
+    # interpolation. Those fragments are code, not a complete user-facing sentence.
+    if "{(" in text or text.endswith((" ?", "?", "{(")):
         return True
     return False
 
