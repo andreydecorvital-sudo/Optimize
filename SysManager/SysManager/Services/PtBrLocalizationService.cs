@@ -32,16 +32,12 @@ public static class PtBrLocalizationService
 
     public static string Translate(string? text)
     {
-        if (PtBrMigrationCatalog.TryTranslate(text, out var migrated))
-            return migrated;
-        if (PtBrMigrationCatalog2.TryTranslate(text, out migrated))
-            return migrated;
-        if (PtBrMigrationCatalog3.TryTranslate(text, out migrated))
-            return migrated;
-        if (PtBrMigrationCatalog4.TryTranslate(text, out migrated))
-            return migrated;
-        if (PtBrRuntimePatternCatalog.TryTranslate(text, out migrated))
-            return migrated;
+        if (PtBrMigrationCatalog.TryTranslate(text, out var migrated)) return migrated;
+        if (PtBrMigrationCatalog2.TryTranslate(text, out migrated)) return migrated;
+        if (PtBrMigrationCatalog3.TryTranslate(text, out migrated)) return migrated;
+        if (PtBrMigrationCatalog4.TryTranslate(text, out migrated)) return migrated;
+        if (PtBrMigrationCatalog5.TryTranslate(text, out migrated)) return migrated;
+        if (PtBrRuntimePatternCatalog.TryTranslate(text, out migrated)) return migrated;
 
         var translated = PtBrTranslationCatalog.Translate(text);
         return PtBrRuntimeFallbackCatalog.Translate(translated);
@@ -71,7 +67,6 @@ public static class PtBrLocalizationService
     {
         TranslateElement(root);
         Observe(root);
-
         var count = VisualTreeHelper.GetChildrenCount(root);
         for (var i = 0; i < count; i++)
             TranslateVisualTree(VisualTreeHelper.GetChild(root, i));
