@@ -22,6 +22,13 @@ public static class ServiceRegistration
         // depend on IPowerShellRunner (substitutable in tests via NSubstitute).
         services.AddTransient<IPowerShellRunner, PowerShellRunner>();
         services.AddSingleton<SystemInfoService>();
+
+        // Optimize safety context. Every new system-changing executor must consult the
+        // compatibility service; unknown actions fail closed instead of applying generically.
+        services.AddSingleton<HardwareProfileService>();
+        services.AddSingleton<OptimizationCompatibilityService>();
+        services.AddSingleton<PowerContextService>();
+
         // WingetService is Transient so each consuming ViewModel gets its own
         // IPowerShellRunner instance — avoids LineReceived cross-talk when
         // Dashboard and AppUpdates both run winget concurrently.
@@ -90,15 +97,27 @@ public static class ServiceRegistration
         services.AddSingleton<IAudioMixerService, AudioMixerService>();
         services.AddSingleton<VolumePresetService>();
         services.AddSingleton<INotificationBlockerService, NotificationBlockerService>();
-        // Gaming Profile orchestrates the audited services above; it needs the process's
-        // elevation state at construction (a value DI can't resolve), hence the factory.
-        services.AddSingleton<IGamingProfileService>(sp => new GamingProfileService(
-            sp.GetRequiredService<PerformanceService>(),
-            sp.GetRequiredService<ITimerResolutionService>(),
-            sp.GetRequiredService<ICpuAffinityService>(),
-            sp.GetRequiredService<StandbyMemoryService>(),
-            sp.GetRequiredService<RestorePointService>(),
-            Helpers.AdminHelper.IsElevated()));
+
+        // Keep the upstream reversible engine, but never expose it directly to the UI.
+        // HardwareAwareGamingProfileService is now the public gate: it identifies the machine,
+        // checks each requested step against compatibility policy, and only then delegates to
+        // the audited snapshot/restore/revert engine.
+        services.AddSingleton<IGamingProfileService>(sp =>
+        {
+            var inner = new GamingProfileService(
+                sp.GetRequiredService<PerformanceService>(),
+                sp.GetRequiredService<ITimerResolutionService>(),
+                sp.GetRequiredService<ICpuAffinityService>(),
+                sp.GetRequiredService<StandbyMemoryService>(),
+                sp.GetRequiredService<RestorePointService>(),
+                Helpers.AdminHelper.IsElevated());
+
+            return new HardwareAwareGamingProfileService(
+                inner,
+                sp.GetRequiredService<HardwareProfileService>(),
+                sp.GetRequiredService<OptimizationCompatibilityService>(),
+                sp.GetRequiredService<PowerContextService>());
+        });
 
         // ── ViewModels (Singleton — one instance per tab) ──────────────
         services.AddSingleton<DashboardViewModel>();
