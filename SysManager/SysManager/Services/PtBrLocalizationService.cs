@@ -40,6 +40,8 @@ public static class PtBrLocalizationService
             return migrated;
         if (PtBrMigrationCatalog4.TryTranslate(text, out migrated))
             return migrated;
+        if (PtBrRuntimePatternCatalog.TryTranslate(text, out migrated))
+            return migrated;
         return PtBrTranslationCatalog.Translate(text);
     }
 
