@@ -1,0 +1,539 @@
+// SysManager · StartupService — enumerate and toggle startup items
+// Author: laurentiu021 · https://github.com/laurentiu021/SystemManager
+// License: MIT
+
+using System.Runtime.InteropServices;
+using Microsoft.Win32;
+using Serilog;
+using SysManager.Models;
+
+namespace SysManager.Services;
+
+/// <summary>
+/// Reads startup entries from the Windows Registry (Run/RunOnce keys)
+/// and optionally Task Scheduler. Toggling is non-destructive: we move
+/// the value between the Run key and a parallel "Disabled" key that
+/// Windows ignores, preserving the original data for re-enabling.
+///
+/// This mirrors the approach used by Task Manager's Startup tab and
+/// Autoruns — no data is ever deleted.
+/// </summary>
+public sealed class StartupService
+{
+    // Standard Run keys
+    private static readonly (string Key, StartupSource Source)[] RunKeys =
+    {
+        (@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", StartupSource.RegistryCurrentUser),
+        (@"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce", StartupSource.RegistryCurrentUser),
+    };
+
+    // Machine-wide Run keys (read-only unless elevated)
+    private static readonly (string Key, StartupSource Source)[] MachineRunKeys =
+    {
+        (@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", StartupSource.RegistryLocalMachine),
+        (@"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce", StartupSource.RegistryLocalMachine),
+    };
+
+    // Approved key where Windows stores disabled startup items
+    private const string ApprovedRunHKCU =
+        @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+    private const string ApprovedRunHKLM =
+        @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+    private const string ApprovedRun32HKLM =
+        @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32";
+    private const string ApprovedStartupFolder =
+        @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder";
+
+    public Task<IReadOnlyList<StartupEntry>> ScanAsync(CancellationToken ct = default)
+        => Task.Run(() => Scan(), ct);
+
+    private static IReadOnlyList<StartupEntry> Scan()
+    {
+        List<StartupEntry> results = [];
+
+        // HKCU Run keys
+        foreach (var (keyPath, source) in RunKeys)
+            ReadRunKey(Registry.CurrentUser, keyPath, source, results);
+
+        // HKLM Run keys
+        foreach (var (keyPath, source) in MachineRunKeys)
+            ReadRunKey(Registry.LocalMachine, keyPath, source, results);
+
+        // Shell startup folders (user + common). The common (all-users) folder's enabled/disabled
+        // state lives under HKLM, not HKCU — flag it so ApplyApprovedState/SetEnabledAsync target
+        // the right hive (see #38).
+        ReadStartupFolder(
+            Environment.GetFolderPath(Environment.SpecialFolder.Startup),
+            "User Startup Folder", isCommon: false, results);
+        ReadStartupFolder(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup),
+            "Common Startup Folder", isCommon: true, results);
+
+        // Task Scheduler logon tasks
+        ReadScheduledTasks(results);
+
+        // Check StartupApproved to determine enabled/disabled state
+        ApplyApprovedState(results);
+
+        return results;
+    }
+
+    private static void ReadStartupFolder(string folderPath, string locationLabel, bool isCommon, List<StartupEntry> results)
+    {
+        try
+        {
+            if (!System.IO.Directory.Exists(folderPath)) return;
+
+            foreach (var file in System.IO.Directory.GetFiles(folderPath))
+            {
+                var name = System.IO.Path.GetFileNameWithoutExtension(file);
+                if (string.IsNullOrWhiteSpace(name)) continue;
+
+                // Resolve .lnk shortcuts to their target
+                var command = file;
+                if (string.Equals(System.IO.Path.GetExtension(file), ".lnk", StringComparison.OrdinalIgnoreCase))
+                {
+                    object? shell = null;
+                    object? shortcut = null;
+                    try
+                    {
+                        var shellType = Type.GetTypeFromProgID("WScript.Shell");
+                        if (shellType is not null)
+                        {
+                            shell = Activator.CreateInstance(shellType)!;
+                            shortcut = ((dynamic)shell).CreateShortcut(file);
+                            command = ((dynamic)shortcut).TargetPath ?? file;
+                        }
+                    }
+                    catch (COMException ex)
+                    {
+                        Log.Debug("Failed to resolve shortcut {File}: {Error}", file, ex.Message);
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        Log.Debug("Failed to resolve shortcut {File}: {Error}", file, ex.Message);
+                    }
+                    catch (Microsoft.CSharp.RuntimeBinder.RuntimeBinderException ex)
+                    {
+                        Log.Debug("Failed to resolve shortcut {File}: {Error}", file, ex.Message);
+                    }
+                    finally
+                    {
+                        if (shortcut is not null) Marshal.ReleaseComObject(shortcut);
+                        if (shell is not null) Marshal.ReleaseComObject(shell);
+                    }
+                }
+
+                results.Add(BuildStartupFolderEntry(file, command, locationLabel, isCommon));
+            }
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Log.Debug("Startup folder inaccessible {Folder}: {Error}", folderPath, ex.Message);
+        }
+        catch (System.IO.IOException ex)
+        {
+            Log.Debug("Startup folder I/O error {Folder}: {Error}", folderPath, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Builds a startup-folder <see cref="StartupEntry"/> from a resolved file. The display
+    /// <see cref="StartupEntry.Name"/> drops the extension, but <see cref="StartupEntry.ValueName"/>
+    /// keeps the FULL filename (with extension) because that is the key Windows uses in
+    /// <c>...\Explorer\StartupApproved\StartupFolder</c>. Keying the approved-state read/write by
+    /// the extension-stripped name (as this did before) meant a disabled item read back as
+    /// enabled and, worse, a "disable" wrote a blob under a name Windows ignores — so the toggle
+    /// silently did nothing. Registry Run entries and scheduled tasks are unaffected (they key by
+    /// their own value/task name).
+    /// </summary>
+    internal static StartupEntry BuildStartupFolderEntry(string file, string command, string locationLabel, bool isCommon = false) =>
+        new()
+        {
+            Name = System.IO.Path.GetFileNameWithoutExtension(file),
+            Command = command,
+            Location = locationLabel,
+            // Common (all-users) folder items store their approved-state under HKLM, per-user
+            // items under HKCU — carry the distinction so the toggle targets the right hive.
+            Source = isCommon ? StartupSource.CommonStartupFolder : StartupSource.StartupFolder,
+            RegistryKey = "",
+            ValueName = System.IO.Path.GetFileName(file),
+            IsEnabled = true,
+            Publisher = ExtractPublisher(command),
+            StatusText = "Enabled"
+        };
+
+    private static void ReadScheduledTasks(List<StartupEntry> results)
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tasks", writable: false);
+            if (key is null) return;
+
+            foreach (var subKeyName in key.GetSubKeyNames())
+            {
+                try
+                {
+                    using var taskKey = key.OpenSubKey(subKeyName, writable: false);
+                    if (taskKey is null) continue;
+
+                    var triggers = taskKey.GetValue("Triggers") as byte[];
+                    if (triggers is null || triggers.Length < 4) continue;
+
+                    var path = taskKey.GetValue("Path")?.ToString() ?? "";
+                    var uri = taskKey.GetValue("URI")?.ToString() ?? path;
+
+                    if (uri.StartsWith(@"\Microsoft\", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (uri.StartsWith(@"\Windows\", StringComparison.OrdinalIgnoreCase)) continue;
+
+                    var description = taskKey.GetValue("Description")?.ToString() ?? "";
+                    var author = taskKey.GetValue("Author")?.ToString() ?? "";
+
+                    var taskName = System.IO.Path.GetFileName(uri.TrimEnd('\\'));
+                    if (string.IsNullOrWhiteSpace(taskName)) continue;
+
+                    if (results.Any(e => string.Equals(e.Name, taskName, StringComparison.OrdinalIgnoreCase)))
+                        continue;
+
+                    results.Add(new StartupEntry
+                    {
+                        Name = taskName,
+                        Command = description.Length > 0 ? description : uri,
+                        Location = "Task Scheduler",
+                        Source = StartupSource.TaskScheduler,
+                        RegistryKey = "",
+                        ValueName = taskName,
+                        TaskPath = uri,
+                        IsEnabled = true,
+                        Publisher = author,
+                        StatusText = "Enabled (scheduled)"
+                    });
+                }
+                catch (System.Security.SecurityException ex)
+                {
+                    Log.Debug("Scheduled task inaccessible {Key}: {Error}", subKeyName, ex.Message);
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    Log.Debug("Scheduled task access denied {Key}: {Error}", subKeyName, ex.Message);
+                }
+                catch (System.IO.IOException ex)
+                {
+                    Log.Debug("Scheduled task I/O error {Key}: {Error}", subKeyName, ex.Message);
+                }
+            }
+        }
+        catch (System.Security.SecurityException ex)
+        {
+            Log.Debug("Task Scheduler registry inaccessible: {Error}", ex.Message);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Log.Debug("Task Scheduler registry access denied: {Error}", ex.Message);
+        }
+    }
+
+    private static void ReadRunKey(RegistryKey root, string keyPath, StartupSource source, List<StartupEntry> results)
+    {
+        try
+        {
+            using var key = root.OpenSubKey(keyPath, writable: false);
+            if (key is null) return;
+
+            var rootName = root == Registry.CurrentUser ? "HKCU" : "HKLM";
+
+            foreach (var valueName in key.GetValueNames().Where(v => !string.IsNullOrWhiteSpace(v)))
+            {
+                var command = key.GetValue(valueName)?.ToString() ?? "";
+                if (string.IsNullOrWhiteSpace(command)) continue;
+
+                results.Add(new StartupEntry
+                {
+                    Name = valueName,
+                    Command = command,
+                    Location = $"{rootName}\\{keyPath}",
+                    Source = source,
+                    RegistryKey = keyPath,
+                    ValueName = valueName,
+                    IsEnabled = true, // will be refined by ApplyApprovedState
+                    Publisher = ExtractPublisher(command),
+                    StatusText = "Enabled"
+                });
+            }
+        }
+        catch (System.Security.SecurityException ex)
+        {
+            Log.Debug("Run key inaccessible {Key}: {Error}", keyPath, ex.Message);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Log.Debug("Run key access denied {Key}: {Error}", keyPath, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Windows stores a 12-byte blob per entry in StartupApproved\Run.
+    /// Byte[0]: 02 = enabled, 03 = disabled. If the key/value doesn't
+    /// exist, the item is considered enabled.
+    /// </summary>
+    private static void ApplyApprovedState(List<StartupEntry> entries)
+    {
+        var hkcuApproved = ReadApprovedKey(Registry.CurrentUser, ApprovedRunHKCU);
+        var hklmApproved = ReadApprovedKey(Registry.LocalMachine, ApprovedRunHKLM);
+        var hklm32Approved = ReadApprovedKey(Registry.LocalMachine, ApprovedRun32HKLM);
+        var folderApproved = ReadApprovedKey(Registry.CurrentUser, ApprovedStartupFolder);
+        // Common (all-users) startup-folder items store their disabled-state under HKLM, not HKCU.
+        var commonFolderApproved = ReadApprovedKey(Registry.LocalMachine, ApprovedStartupFolder);
+
+        foreach (var entry in entries)
+        {
+            Dictionary<string, byte[]>? approved = entry.Source switch
+            {
+                StartupSource.RegistryCurrentUser => hkcuApproved,
+                StartupSource.RegistryLocalMachine => hklmApproved ?? hklm32Approved,
+                StartupSource.StartupFolder => folderApproved,
+                StartupSource.CommonStartupFolder => commonFolderApproved,
+                _ => null
+            };
+
+            if (approved is not null && approved.TryGetValue(entry.ValueName, out var blob) && blob.Length >= 1)
+            {
+                // Windows uses bit 0 to indicate disabled state:
+                // 02/06 = enabled (even), 03/07 = disabled (odd).
+                // Windows 11 uses 07 in addition to the classic 03.
+                entry.IsEnabled = (blob[0] & 1) == 0;
+                entry.StatusText = entry.IsEnabled ? "Enabled" : "Disabled";
+            }
+        }
+    }
+
+    private static Dictionary<string, byte[]>? ReadApprovedKey(RegistryKey root, string keyPath)
+    {
+        try
+        {
+            using var key = root.OpenSubKey(keyPath, writable: false);
+            if (key is null) return null;
+
+            var dict = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+            foreach (var name in key.GetValueNames().Where(n => key.GetValue(n) is byte[]))
+                dict[name] = (byte[])key.GetValue(name)!;
+            return dict;
+        }
+        catch (System.Security.SecurityException) { return null; /* protected key */ }
+        catch (UnauthorizedAccessException) { return null; /* protected key */ }
+        catch (System.IO.IOException) { return null; /* I/O error reading key */ }
+    }
+
+    /// <summary>
+    /// Toggle a startup entry on or off by writing to the StartupApproved
+    /// registry key. This is the same mechanism Task Manager uses.
+    /// Non-destructive — the Run key value is never deleted.
+    /// </summary>
+    public static async Task<bool> SetEnabledAsync(StartupEntry entry, bool enabled)
+    {
+        try
+        {
+            if (entry.Source == StartupSource.TaskScheduler)
+            {
+                return await SetTaskSchedulerEnabledAsync(entry, enabled).ConfigureAwait(false);
+            }
+
+            // RunOnce entries cannot be toggled via StartupApproved: Windows has no
+            // StartupApproved\RunOnce subkey and never consults StartupApproved for RunOnce
+            // keys, so writing the disable blob to StartupApproved\Run (the fallback below)
+            // does nothing while returning success — the item still runs at next boot and the
+            // UI falsely shows "Disabled". Report the truth instead of pretending it worked.
+            if (entry.RegistryKey.EndsWith("RunOnce", StringComparison.OrdinalIgnoreCase))
+            {
+                entry.StatusText = "Run-once item — runs next boot, then removes itself; cannot be disabled here.";
+                return false;
+            }
+
+            var (root, approvedPath) = entry.Source switch
+            {
+                StartupSource.RegistryCurrentUser => (Registry.CurrentUser, ApprovedRunHKCU),
+                StartupSource.RegistryLocalMachine => (Registry.LocalMachine, ApprovedRunHKLM),
+                StartupSource.StartupFolder => (Registry.CurrentUser, ApprovedStartupFolder),
+                // Common (all-users) folder items live under HKLM — writing to HKCU (as before)
+                // put the disable blob where Windows never looks, so the item still ran while the
+                // UI claimed "Disabled". HKLM needs elevation; a non-elevated open below returns
+                // null and surfaces the same access-denied status as the HKLM Run path.
+                StartupSource.CommonStartupFolder => (Registry.LocalMachine, ApprovedStartupFolder),
+                _ => (Registry.CurrentUser, ApprovedRunHKCU)
+            };
+
+            using var key = root.OpenSubKey(approvedPath, writable: true);
+            if (key is null)
+            {
+                entry.StatusText = "Error — StartupApproved key not found";
+                return false;
+            }
+
+            // Build the 12-byte blob: byte[0] = 02 (enabled) or 03 (disabled)
+            var existing = key.GetValue(entry.ValueName) as byte[];
+            var blob = existing ?? new byte[12];
+            if (blob.Length < 12)
+            {
+                var padded = new byte[12];
+                Array.Copy(blob, padded, Math.Min(blob.Length, 12));
+                blob = padded;
+            }
+
+            blob[0] = enabled ? (byte)2 : (byte)3;
+
+            // When disabling, bytes 4-11 store the FILETIME of when it was disabled
+            if (!enabled)
+            {
+                var ft = DateTime.UtcNow.ToFileTimeUtc();
+                var ftBytes = BitConverter.GetBytes(ft);
+                Array.Copy(ftBytes, 0, blob, 4, 8);
+            }
+
+            key.SetValue(entry.ValueName, blob, RegistryValueKind.Binary);
+
+            entry.IsEnabled = enabled;
+            entry.StatusText = enabled ? "Enabled" : "Disabled";
+            return true;
+        }
+        catch (System.Security.SecurityException)
+        {
+            entry.StatusText = "Error — access denied (registry protected)";
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            entry.StatusText = "Error — access denied (requires elevation)";
+            return false;
+        }
+        catch (System.IO.IOException ex)
+        {
+            entry.StatusText = $"Error — {ex.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Enable or disable a Task Scheduler logon task via schtasks.exe.
+    /// </summary>
+    private static async Task<bool> SetTaskSchedulerEnabledAsync(StartupEntry entry, bool enabled)
+    {
+        try
+        {
+            var taskPath = entry.TaskPath;
+            if (string.IsNullOrWhiteSpace(taskPath))
+            {
+                entry.StatusText = "Error — task path unknown";
+                return false;
+            }
+
+            // Reject task paths containing characters that could break argument parsing
+            if (taskPath.Contains('"') || taskPath.Contains('\0'))
+            {
+                entry.StatusText = "Error — invalid task path";
+                return false;
+            }
+
+            var args = enabled
+                ? $"/Change /TN \"{taskPath}\" /Enable"
+                : $"/Change /TN \"{taskPath}\" /Disable";
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = SysManager.Helpers.SystemPaths.ResolveSystemTool("schtasks.exe"),
+                Arguments = args,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc is null)
+            {
+                entry.StatusText = "Error — could not start schtasks";
+                return false;
+            }
+
+            // Read streams BEFORE WaitForExitAsync to avoid deadlock when the
+            // pipe buffer fills up and the child process blocks on write.
+            var stderrTask = proc.StandardError.ReadToEndAsync();
+            _ = proc.StandardOutput.ReadToEndAsync(); // drain stdout to prevent deadlock
+
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            try
+            {
+                await proc.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Kill() can also throw Win32Exception (access denied / terminating) —
+                // previously that escaped to the outer Win32Exception catch, which
+                // mislabeled the timeout as "schtasks not available". Swallow the same
+                // kill-failure set PowerShellRunner's cancel-kill uses so the truthful
+                // "timed out" status is always reported.
+                try { proc.Kill(); }
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException)
+                { Log.Debug(ex, "Could not kill schtasks after timeout"); }
+                entry.StatusText = "Error — schtasks timed out";
+                return false;
+            }
+
+            string stderr;
+            try
+            {
+                stderr = (await stderrTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false)).Trim();
+            }
+            catch (TimeoutException)
+            {
+                stderr = string.Empty;
+            }
+
+            if (proc.ExitCode == 0)
+            {
+                entry.IsEnabled = enabled;
+                entry.StatusText = enabled ? "Enabled (scheduled)" : "Disabled (scheduled)";
+                return true;
+            }
+
+            entry.StatusText = $"Error — {(stderr.Length > 0 ? stderr : "schtasks failed")}";
+            return false;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            entry.StatusText = "Error — schtasks not available";
+            return false;
+        }
+        catch (InvalidOperationException ex)
+        {
+            entry.StatusText = $"Error — {ex.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Extract a rough publisher name from the command path.
+    /// </summary>
+    private static string ExtractPublisher(string command)
+    {
+        try
+        {
+            // Strip quotes and arguments
+            var path = command.Trim('"', ' ');
+            var spaceIdx = path.IndexOf(' ');
+            if (spaceIdx > 0 && !System.IO.File.Exists(path))
+                path = path[..spaceIdx].Trim('"');
+
+            if (System.IO.File.Exists(path))
+            {
+                var vi = System.Diagnostics.FileVersionInfo.GetVersionInfo(path);
+                return vi.CompanyName ?? "";
+            }
+        }
+        catch (System.IO.FileNotFoundException) { /* file not found */ }
+        catch (System.IO.IOException) { /* I/O error */ }
+        catch (UnauthorizedAccessException) { /* access denied */ }
+        catch (System.Security.SecurityException) { /* security error */ }
+        return "";
+    }
+}

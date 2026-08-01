@@ -1,0 +1,733 @@
+// SysManager · PerformanceService — manages power plans and performance tweaks
+// Author: laurentiu021 · https://github.com/laurentiu021/SystemManager
+// License: MIT
+
+using System.Collections.Concurrent;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security;
+using System.Text.Json;
+using Microsoft.Win32;
+using Serilog;
+using SysManager.Models;
+
+namespace SysManager.Services;
+
+/// <summary>
+/// Reads and applies performance settings: power plans (powercfg),
+/// visual effects (P/Invoke), Game Mode, Xbox Game Bar, GPU max perf,
+/// processor state.
+///
+/// SAFETY CONTRACT:
+/// • Every change is two-door: enable ↔ disable.
+/// • Before the first Apply, we snapshot the original system state.
+/// • Restore always reverts to that snapshot, not to hardcoded defaults.
+/// • NVIDIA GPU subkey is auto-detected (not hardcoded to 0000).
+/// • Visual effects use SystemParametersInfo (instant), not registry-only.
+/// </summary>
+public sealed partial class PerformanceService : IDisposable
+{
+    private readonly IPowerShellRunner _ps;
+    private readonly RestorePointService _restorePoints;
+    private readonly SemaphoreSlim _psGate = new(1, 1);
+    private bool _disposed;
+
+    // ── Well-known power plan GUIDs ──
+    internal const string BalancedGuid = "381b4222-f694-41f0-9685-ff5bb260df2e";
+    internal const string HighPerfGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
+    internal const string UltimatePerfScheme = "e9a42b02-d5df-448d-aa00-03f14749eb61";
+
+    // ── Registry paths ──
+    internal const string GameBarKey = @"SOFTWARE\Microsoft\GameBar";
+    internal const string GameDvrKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR";
+    internal const string GameConfigStoreKey = @"System\GameConfigStore";
+    internal const string GpuClassRoot = @"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
+
+    // ── P/Invoke for visual effects ──
+    private const uint SPI_GETUIEFFECTS = 0x103E;
+    private const uint SPI_SETUIEFFECTS = 0x103F;
+    private const uint SPIF_SENDCHANGE = 0x02;
+
+    [LibraryImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SystemParametersInfoGet(
+        uint uiAction, uint uiParam, ref int pvParam, uint fWinIni);
+
+    [LibraryImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SystemParametersInfoSet(
+        uint uiAction, uint uiParam, int pvParam, uint fWinIni);
+
+    public PerformanceService(IPowerShellRunner ps, RestorePointService restorePoints)
+    {
+        _ps = ps;
+        _restorePoints = restorePoints;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  SNAPSHOT — captures original state for safe restore
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Immutable snapshot of the system state taken before any changes.
+    /// Used by Restore to revert to the exact original state.
+    /// </summary>
+    public sealed record OriginalSnapshot(
+        string PowerPlanGuid,
+        string PowerPlanName,
+        bool UiEffectsEnabled,
+        bool GameModeEnabled,
+        bool XboxGameBarEnabled,
+        bool XboxGameDvrEnabled,
+        bool GpuDynamicPstate,       // true = dynamic (default), false = disabled
+        int? ProcessorMinPercentAc,  // null = couldn't read (don't restore rather than guess)
+        string? NvidiaSubKey);       // null = no NVIDIA GPU
+
+    /// <summary>
+    /// Take a snapshot of the current system state.
+    /// IMPORTANT: callers MUST invoke this BEFORE applying any change, otherwise
+    /// the snapshot will capture already-modified state and Restore will not be
+    /// able to revert to the original baseline. The recommended pattern is to
+    /// guard every Apply through a wrapper that lazy-initializes the snapshot
+    /// (see PerformanceViewModel.EnsureSnapshotAsync).
+    /// </summary>
+    public async Task<OriginalSnapshot> TakeSnapshotAsync(CancellationToken ct = default)
+    {
+        var (name, guid) = await GetActivePlanAsync(ct).ConfigureAwait(false);
+        var nvidiaKey = FindNvidiaSubKey();
+
+        return new OriginalSnapshot(
+            PowerPlanGuid: guid,
+            PowerPlanName: name,
+            UiEffectsEnabled: GetUiEffectsEnabled(),
+            GameModeEnabled: ReadGameMode(),
+            XboxGameBarEnabled: ReadXboxGameBarEnabled(),
+            XboxGameDvrEnabled: ReadXboxGameDvrEnabled(),
+            GpuDynamicPstate: nvidiaKey is not null && !ReadGpuMaxPerformance(nvidiaKey),
+            ProcessorMinPercentAc: await ReadProcessorMinPercentAsync(ct).ConfigureAwait(false),
+            NvidiaSubKey: nvidiaKey);
+    }
+
+    private static readonly string SnapshotPath = Path.Join(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "SysManager", "performance-snapshot.json");
+
+    /// <summary>Persist a snapshot to disk so it survives app restarts.</summary>
+    public static void SaveSnapshot(OriginalSnapshot snapshot)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(SnapshotPath)!;
+            Directory.CreateDirectory(dir);
+            var json = JsonSerializer.Serialize(snapshot, JsonDefaults.Indented);
+            File.WriteAllText(SnapshotPath, json);
+            Log.Information("Performance snapshot saved to {Path}", SnapshotPath);
+        }
+        catch (IOException ex) { Log.Warning(ex, "Failed to save performance snapshot"); }
+        catch (UnauthorizedAccessException ex) { Log.Warning(ex, "Failed to save performance snapshot"); }
+    }
+
+    /// <summary>
+    /// Delete the persisted snapshot from disk. Called after "Restore All" so the next
+    /// Apply captures a fresh baseline instead of reloading the now-reverted pre-restore
+    /// state via <see cref="LoadSnapshot"/>.
+    /// </summary>
+    public static void DeleteSnapshot()
+    {
+        try
+        {
+            if (File.Exists(SnapshotPath)) File.Delete(SnapshotPath);
+            Log.Information("Performance snapshot deleted from {Path}", SnapshotPath);
+        }
+        catch (IOException ex) { Log.Warning(ex, "Failed to delete performance snapshot"); }
+        catch (UnauthorizedAccessException ex) { Log.Warning(ex, "Failed to delete performance snapshot"); }
+    }
+
+    /// <summary>Load a previously saved snapshot from disk. Returns null if none exists.</summary>
+    public static OriginalSnapshot? LoadSnapshot()
+    {
+        try
+        {
+            if (!File.Exists(SnapshotPath)) return null;
+            var json = File.ReadAllText(SnapshotPath);
+            return JsonSerializer.Deserialize<OriginalSnapshot>(json);
+        }
+        catch (IOException ex) { Log.Warning(ex, "Failed to load performance snapshot"); return null; }
+        catch (UnauthorizedAccessException ex) { Log.Warning(ex, "Failed to load performance snapshot"); return null; }
+        catch (JsonException ex) { Log.Warning(ex, "Failed to parse performance snapshot"); return null; }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  READ — current system state
+    // ═══════════════════════════════════════════════════════════════
+
+    public async Task<PerformanceProfile> ReadProfileAsync(CancellationToken ct = default)
+    {
+        var profile = new PerformanceProfile();
+
+        var (name, guid) = await GetActivePlanAsync(ct).ConfigureAwait(false);
+        profile.ActivePlanName = name;
+        profile.ActivePlanGuid = guid;
+
+        profile.VisualEffectsReduced = !GetUiEffectsEnabled();
+        profile.GameModeEnabled = ReadGameMode();
+        profile.XboxGameBarDisabled = !ReadXboxGameBarEnabled() || !ReadXboxGameDvrEnabled();
+
+        var nvidiaKey = FindNvidiaSubKey();
+        profile.HasNvidiaGpu = nvidiaKey is not null;
+        if (nvidiaKey is not null)
+        {
+            profile.NvidiaGpuName = ReadNvidiaGpuName(nvidiaKey);
+            profile.GpuMaxPerformance = ReadGpuMaxPerformance(nvidiaKey);
+        }
+
+        // Display-only profile: if the value can't be read, fall back to the Windows default
+        // (5) for the UI — unchanged from before. The RESTORE path (snapshot) keeps the true
+        // null so it never writes back a guessed value.
+        var minPct = await ReadProcessorMinPercentAsync(ct).ConfigureAwait(false) ?? 5;
+        profile.ProcessorMinPercent = minPct;
+        profile.ProcessorMaxState = minPct >= 100;
+
+        return profile;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  POWER PLAN
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>Parse active plan from powercfg /getactivescheme output.</summary>
+    public async Task<(string Name, string Guid)> GetActivePlanAsync(CancellationToken ct = default)
+    {
+        await _psGate.WaitAsync(ct).ConfigureAwait(false);
+        // ConcurrentQueue: LineReceived fires from BOTH the stdout and stderr reader threads,
+        // so a plain List<string>.Add could interleave and corrupt/throw. Matches WingetService.
+        ConcurrentQueue<string> lines = new();
+        void OnLine(PowerShellLine l) => lines.Enqueue(l.Text);
+        _ps.LineReceived += OnLine;
+        try { await _ps.RunProcessAsync("powercfg.exe", "/getactivescheme", ct, PowerShellRunner.OemEncoding).ConfigureAwait(false); }
+        finally { _ps.LineReceived -= OnLine; _psGate.Release(); }
+
+        return ParseActivePlan([.. lines]);
+    }
+
+    // Canonical GUID token (8-4-4-4-12 hex). powercfg prints the active plan's GUID in this
+    // exact form in EVERY display language, so anchoring on it makes the parse locale-agnostic.
+    [System.Text.RegularExpressions.GeneratedRegex(
+        "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")]
+    private static partial System.Text.RegularExpressions.Regex PowerPlanGuidRegex();
+
+    /// <summary>
+    /// Parses powercfg /getactivescheme output. Example (en-US):
+    /// "Power Scheme GUID: 381b4222-...  (Balanced)".
+    /// Locale-agnostic: the English label ("Power Scheme GUID:") is translated on non-English
+    /// Windows, so we anchor on the canonical GUID token itself (stable in every language)
+    /// rather than the label. The friendly name is read from the trailing parentheses when
+    /// present (localized, display-only); otherwise the GUID stands in.
+    /// </summary>
+    internal static (string Name, string Guid) ParseActivePlan(IList<string> lines)
+    {
+        foreach (var line in lines)
+        {
+            var m = PowerPlanGuidRegex().Match(line);
+            if (!m.Success) continue;
+            var guid = m.Value;
+            var parenStart = line.IndexOf('(');
+            var parenEnd = line.IndexOf(')');
+            var name = parenStart >= 0 && parenEnd > parenStart
+                ? line[(parenStart + 1)..parenEnd].Trim()
+                : guid;
+            return (name, guid);
+        }
+        return ("Unknown", "");
+    }
+
+    /// <summary>Activate a power plan by GUID.</summary>
+    public async Task SetActivePlanAsync(string guid, CancellationToken ct = default)
+    {
+        // Serialize on the same gate the readers use: they own the shared
+        // _ps.LineReceived while parsing, and a concurrent powercfg call on the
+        // same runner would interleave their output stream.
+        await _psGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _ps.RunProcessAsync("powercfg.exe", $"/setactive {guid}", ct, PowerShellRunner.OemEncoding).ConfigureAwait(false);
+        }
+        finally { _psGate.Release(); }
+    }
+
+    /// <summary>
+    /// Create Ultimate Performance plan if it doesn't exist, return its GUID.
+    /// </summary>
+    public async Task<string> EnsureUltimatePerformancePlanAsync(CancellationToken ct = default)
+    {
+        var existingGuid = await FindPlanGuidByNameAsync("Ultimate Performance", ct).ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(existingGuid)) return existingGuid;
+
+        // ConcurrentQueue: LineReceived fires from BOTH the stdout and stderr reader threads,
+        // so a plain List<string>.Add could interleave and corrupt/throw. Matches WingetService.
+        ConcurrentQueue<string> lines = new();
+        void OnLine(PowerShellLine l) => lines.Enqueue(l.Text);
+        await _psGate.WaitAsync(ct).ConfigureAwait(false);
+        _ps.LineReceived += OnLine;
+        try { await _ps.RunProcessAsync("powercfg.exe", $"-duplicatescheme {UltimatePerfScheme}", ct, PowerShellRunner.OemEncoding).ConfigureAwait(false); }
+        finally { _ps.LineReceived -= OnLine; _psGate.Release(); }
+
+        // Parse GUID from output: "Power Scheme GUID: <guid>  (Ultimate Performance)"
+        foreach (var line in lines)
+        {
+            var idx = line.IndexOf("GUID:", StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) continue;
+            var after = line[(idx + 5)..].Trim();
+            var sp = after.IndexOf(' ');
+            return sp > 0 ? after[..sp].Trim() : after.Trim();
+        }
+
+        return await FindPlanGuidByNameAsync("Ultimate Performance", ct).ConfigureAwait(false) ?? "";
+    }
+
+    /// <summary>Find a plan GUID by name substring.</summary>
+    public async Task<string?> FindPlanGuidByNameAsync(string nameSubstring, CancellationToken ct = default)
+    {
+        await _psGate.WaitAsync(ct).ConfigureAwait(false);
+        // ConcurrentQueue: LineReceived fires from BOTH the stdout and stderr reader threads,
+        // so a plain List<string>.Add could interleave and corrupt/throw. Matches WingetService.
+        ConcurrentQueue<string> lines = new();
+        void OnLine(PowerShellLine l) => lines.Enqueue(l.Text);
+        _ps.LineReceived += OnLine;
+        try { await _ps.RunProcessAsync("powercfg.exe", "/list", ct, PowerShellRunner.OemEncoding).ConfigureAwait(false); }
+        finally { _ps.LineReceived -= OnLine; _psGate.Release(); }
+
+        return ParsePlanGuidByName([.. lines], nameSubstring);
+    }
+
+    internal static string? ParsePlanGuidByName(IList<string> lines, string nameSubstring)
+    {
+        foreach (var line in lines.Where(l => l.Contains(nameSubstring, StringComparison.OrdinalIgnoreCase)))
+        {
+            var idx = line.IndexOf(':');
+            if (idx < 0) continue;
+            var after = line[(idx + 1)..].Trim();
+            var sp = after.IndexOf(' ');
+            return sp > 0 ? after[..sp].Trim() : after.Trim();
+        }
+        return null;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  VISUAL EFFECTS — via P/Invoke (instant, no logout needed)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>Read whether UI effects are currently enabled.</summary>
+    internal static bool GetUiEffectsEnabled()
+    {
+        int enabled = 1;
+        SystemParametersInfoGet(SPI_GETUIEFFECTS, 0, ref enabled, 0);
+        return enabled != 0;
+    }
+
+    /// <summary>
+    /// Enable or disable all UI effects (animations, fades, shadows).
+    /// Uses SystemParametersInfo which takes effect immediately — no
+    /// logout or registry-only hack needed.
+    /// Reversible: call with true to re-enable.
+    /// </summary>
+    public static void SetUiEffects(bool enabled)
+    {
+        SystemParametersInfoSet(SPI_SETUIEFFECTS, 0, enabled ? 1 : 0, SPIF_SENDCHANGE);
+        Log.Information("System: Visual effects {Action}", enabled ? "enabled" : "reduced");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  GAME MODE — HKCU registry (instant, no reboot)
+    // ═══════════════════════════════════════════════════════════════
+
+    internal static bool ReadGameMode()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(GameBarKey);
+            if (key is null) return true; // Windows default = ON
+            var val = key.GetValue("AllowAutoGameMode");
+            // If key exists but value doesn't, default is ON
+            if (val is null) return true;
+            return val is int i && i == 1;
+        }
+        catch (SecurityException) { return true; }
+        catch (UnauthorizedAccessException) { return true; }
+    }
+
+    /// <summary>
+    /// Enable or disable Game Mode.
+    /// Reversible: call with true to re-enable.
+    /// </summary>
+    public static void SetGameMode(bool enabled)
+    {
+        using var key = Registry.CurrentUser.CreateSubKey(GameBarKey);
+        key.SetValue("AllowAutoGameMode", enabled ? 1 : 0, RegistryValueKind.DWord);
+        key.SetValue("AutoGameModeEnabled", enabled ? 1 : 0, RegistryValueKind.DWord);
+        Log.Information("Registry: Game Mode {Action} (AllowAutoGameMode={Value})",
+            enabled ? "enabled" : "disabled", enabled ? 1 : 0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  XBOX GAME BAR / DVR OVERLAY — HKCU registry (instant)
+    // ═══════════════════════════════════════════════════════════════
+
+    internal static bool ReadXboxGameBarEnabled()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(GameDvrKey);
+            if (key is null) return true; // default = enabled
+            var val = key.GetValue("AppCaptureEnabled");
+            if (val is null) return true;
+            return val is int i && i == 1;
+        }
+        catch (SecurityException) { return true; }
+        catch (UnauthorizedAccessException) { return true; }
+    }
+
+    internal static bool ReadXboxGameDvrEnabled()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(GameConfigStoreKey);
+            if (key is null) return true;
+            var val = key.GetValue("GameDVR_Enabled");
+            if (val is null) return true;
+            return val is int i && i == 1;
+        }
+        catch (SecurityException) { return true; }
+        catch (UnauthorizedAccessException) { return true; }
+    }
+
+    /// <summary>
+    /// Enable or disable Xbox Game Bar overlay and Game DVR together — the user-facing
+    /// toggle sets both keys to the same state. Reversible: call with true to re-enable.
+    /// </summary>
+    public static void SetXboxGameBar(bool enabled) => SetXboxGameBar(enabled, enabled);
+
+    /// <summary>
+    /// Sets the two independent Xbox registry values separately. Used by snapshot restore,
+    /// where <c>AppCaptureEnabled</c> (Game Bar) and <c>GameDVR_Enabled</c> (per-game DVR)
+    /// can legitimately differ — a user may have one on and the other off. Collapsing them
+    /// into a single value (e.g. <c>barEnabled &amp;&amp; dvrEnabled</c>) would leave one key in
+    /// the wrong state on restore, breaking the "revert to the exact snapshot" contract.
+    /// </summary>
+    public static void SetXboxGameBar(bool appCaptureEnabled, bool gameDvrEnabled)
+    {
+        using var dvrKey = Registry.CurrentUser.CreateSubKey(GameDvrKey);
+        dvrKey.SetValue("AppCaptureEnabled", appCaptureEnabled ? 1 : 0, RegistryValueKind.DWord);
+
+        using var configKey = Registry.CurrentUser.CreateSubKey(GameConfigStoreKey);
+        configKey.SetValue("GameDVR_Enabled", gameDvrEnabled ? 1 : 0, RegistryValueKind.DWord);
+        Log.Information("Registry: Xbox Game Bar set (AppCaptureEnabled={Bar}, GameDVR_Enabled={Dvr})",
+            appCaptureEnabled ? 1 : 0, gameDvrEnabled ? 1 : 0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  NVIDIA GPU — auto-detect subkey, registry (requires reboot)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Auto-detect the registry subkey for the NVIDIA GPU.
+    /// Scans 0000, 0001, 0002, ... and checks DriverDesc/ProviderName
+    /// for "NVIDIA". Returns null if no NVIDIA GPU found.
+    /// </summary>
+    internal static string? FindNvidiaSubKey()
+    {
+        try
+        {
+            using var classRoot = Registry.LocalMachine.OpenSubKey(GpuClassRoot);
+            if (classRoot is null) return null;
+
+            foreach (var subName in classRoot.GetSubKeyNames().Where(s => int.TryParse(s, out _)))
+            {
+                try
+                {
+                    using var sub = classRoot.OpenSubKey(subName);
+                    if (sub is null) continue;
+
+                    var driverDesc = sub.GetValue("DriverDesc")?.ToString() ?? "";
+                    var provider = sub.GetValue("ProviderName")?.ToString() ?? "";
+
+                    if (driverDesc.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase)
+                        || provider.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return subName;
+                    }
+                }
+                catch (SecurityException) { /* skip inaccessible subkeys */ }
+                catch (UnauthorizedAccessException) { /* skip inaccessible subkeys */ }
+            }
+        }
+        catch (SecurityException) { /* registry not accessible */ }
+        catch (UnauthorizedAccessException) { /* registry not accessible */ }
+
+        return null;
+    }
+
+    /// <summary>Read the NVIDIA GPU friendly name from DriverDesc.</summary>
+    internal static string ReadNvidiaGpuName(string subKey)
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey($@"{GpuClassRoot}\{subKey}");
+            return key?.GetValue("DriverDesc")?.ToString() ?? "NVIDIA GPU";
+        }
+        catch (SecurityException) { return "NVIDIA GPU"; }
+        catch (UnauthorizedAccessException) { return "NVIDIA GPU"; }
+    }
+
+    /// <summary>Read whether DisableDynamicPstate is set to 1.</summary>
+    internal static bool ReadGpuMaxPerformance(string subKey)
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey($@"{GpuClassRoot}\{subKey}");
+            if (key is null) return false;
+            var val = key.GetValue("DisableDynamicPstate");
+            return val is int i && i == 1;
+        }
+        catch (SecurityException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>
+    /// Set NVIDIA GPU to max performance (DisableDynamicPstate=1) or
+    /// restore dynamic P-state (=0). Requires admin + reboot.
+    /// Returns false if the registry key doesn't exist.
+    /// Reversible: call with false to restore dynamic.
+    /// </summary>
+    public static bool SetGpuMaxPerformance(string subKey, bool maxPerformance)
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                $@"{GpuClassRoot}\{subKey}", writable: true);
+            if (key is null) return false;
+
+            if (maxPerformance)
+                key.SetValue("DisableDynamicPstate", 1, RegistryValueKind.DWord);
+            else
+            {
+                // Restore: set to 0 (don't delete — safer)
+                key.SetValue("DisableDynamicPstate", 0, RegistryValueKind.DWord);
+            }
+            Log.Information("Registry: GPU DisableDynamicPstate set to {Value} on subkey {SubKey}",
+                maxPerformance ? 1 : 0, subKey);
+            return true;
+        }
+        catch (SecurityException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  PROCESSOR STATE — powercfg (instant, no reboot)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Read the current processor minimum state percentage (AC), or null if it can't be
+    /// parsed. Callers that persist it for restore MUST keep the null (never substitute a
+    /// default), so a snapshot on a machine we couldn't read doesn't write back a wrong value.
+    /// </summary>
+    internal async Task<int?> ReadProcessorMinPercentAsync(CancellationToken ct = default)
+    {
+        await _psGate.WaitAsync(ct).ConfigureAwait(false);
+        // ConcurrentQueue: LineReceived fires from BOTH the stdout and stderr reader threads,
+        // so a plain List<string>.Add could interleave and corrupt/throw. Matches WingetService.
+        ConcurrentQueue<string> lines = new();
+        void OnLine(PowerShellLine l) => lines.Enqueue(l.Text);
+        _ps.LineReceived += OnLine;
+        try
+        {
+            await _ps.RunProcessAsync("powercfg.exe",
+                "/query SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN", ct, PowerShellRunner.OemEncoding).ConfigureAwait(false);
+        }
+        finally { _ps.LineReceived -= OnLine; _psGate.Release(); }
+
+        return ParseProcessorMinPercent([.. lines]);
+    }
+
+    internal static int? ParseProcessorMinPercent(IList<string> lines)
+    {
+        // powercfg /query SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN prints, in an order that
+        // is identical in every display language, up to five hex values:
+        //   Minimum Possible Setting, Maximum Possible Setting, Possible Settings increment,
+        //   Current AC Power Setting Index, Current DC Power Setting Index.
+        // Only the LABELS are translated; the AC-before-DC ordering and the fact that the two
+        // "current index" lines come LAST never change — so the AC index we want is always the
+        // second-to-last hex token in the output, and DC the last.
+        //
+        // Fast path (en-US): match the English AC label exactly — cheap and unambiguous.
+        foreach (var line in lines.Where(l => l.Contains("Current AC Power Setting Index", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (TryParseHexToken(line, out var acVal)) return acVal;
+        }
+        // Locale-agnostic fallback: on non-English Windows the label above is translated, so the
+        // fast path misses. Collect every hex token in order and take the second-to-last (AC).
+        // The previous fallback returned the FIRST hex token — "Minimum Possible Setting" (0x0) —
+        // so on non-English Windows it read 0, and a later "Restore" wrote 0% back as the minimum.
+        List<int> hexValues = [];
+        foreach (var line in lines)
+        {
+            if (TryParseHexToken(line, out var val)) hexValues.Add(val);
+        }
+        // Need both current-index tokens (AC + DC) to trust the ordering; AC is second-to-last.
+        // Fewer than two = ambiguous, so return null rather than guess — never fabricate a value.
+        return hexValues.Count >= 2 ? hexValues[^2] : null;
+    }
+
+    private static bool TryParseHexToken(string line, out int value)
+    {
+        value = 0;
+        var hexIdx = line.IndexOf("0x", StringComparison.OrdinalIgnoreCase);
+        if (hexIdx < 0) return false;
+        var hex = line[(hexIdx + 2)..].Trim();
+        return int.TryParse(hex, System.Globalization.NumberStyles.HexNumber, null, out value);
+    }
+
+    /// <summary>
+    /// Set processor minimum state to a specific percentage.
+    /// Reversible: call with the original percentage to restore.
+    /// </summary>
+    public async Task SetProcessorMinStateAsync(int percent, CancellationToken ct = default)
+    {
+        // Serialize on the shared gate — see SetActivePlanAsync.
+        await _psGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _ps.RunProcessAsync("powercfg.exe",
+                $"/setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN {percent}", ct, PowerShellRunner.OemEncoding).ConfigureAwait(false);
+            await _ps.RunProcessAsync("powercfg.exe",
+                $"/setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN {percent}", ct, PowerShellRunner.OemEncoding).ConfigureAwait(false);
+            await _ps.RunProcessAsync("powercfg.exe", "/setactive SCHEME_CURRENT", ct, PowerShellRunner.OemEncoding).ConfigureAwait(false);
+        }
+        finally { _psGate.Release(); }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  RESTORE POINT — via WMI (requires admin)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Create a Windows System Restore point. Requires admin elevation.
+    /// Returns true if the restore point was created successfully.
+    /// Delegates to <see cref="RestorePointService.CreateAsync"/> so restore-point creation
+    /// has a single source of truth (it also enables System Restore on the system drive
+    /// first) — this method exists only as the Performance tab's convenience entry point.
+    /// </summary>
+    public Task<bool> CreateRestorePointAsync(string description, CancellationToken ct = default)
+        => _restorePoints.CreateAsync(description, ct);
+
+    // ═══════════════════════════════════════════════════════════════
+    //  RAM WORKING SET TRIM — via EmptyWorkingSet (instant)
+    // ═══════════════════════════════════════════════════════════════
+
+    [LibraryImport("psapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool EmptyWorkingSet(IntPtr hProcess);
+
+    /// <summary>
+    /// Trim the working set of all accessible processes, freeing physical
+    /// RAM pages back to the standby list. Pages are soft-faulted back in
+    /// on demand — no data is lost, but apps may feel briefly slower on
+    /// next access. This is the same operation as "Empty Working Set" in
+    /// RAMMap. Does not require a reboot.
+    /// </summary>
+    /// <returns>Number of processes successfully trimmed.</returns>
+    public static int TrimWorkingSets()
+    {
+        int trimmed = 0;
+        foreach (var proc in System.Diagnostics.Process.GetProcesses())
+        {
+            using (proc)
+            {
+                try
+                {
+                    if (EmptyWorkingSet(proc.Handle))
+                        trimmed++;
+                }
+                catch (System.ComponentModel.Win32Exception) { /* access denied — skip */ }
+                catch (InvalidOperationException) { /* process exited — skip */ }
+            }
+        }
+        return trimmed;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  HIBERNATION TOGGLE — powercfg (requires admin)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Read whether hibernation is currently enabled by checking for
+    /// the hiberfil.sys file on the system drive.
+    /// </summary>
+    public static bool ReadHibernationEnabled()
+    {
+        var systemDrive = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        var root = System.IO.Path.GetPathRoot(systemDrive) ?? @"C:\";
+        var hiberFile = System.IO.Path.Join(root, "hiberfil.sys");
+        return System.IO.File.Exists(hiberFile);
+    }
+
+    /// <summary>
+    /// Enable or disable hibernation. Requires admin.
+    /// When disabled, deletes hiberfil.sys and frees disk space.
+    /// Reversible: call with true to re-enable.
+    /// </summary>
+    public async Task SetHibernationAsync(bool enabled, CancellationToken ct = default)
+    {
+        var arg = enabled ? "/hibernate on" : "/hibernate off";
+        // Serialize on the shared gate — see SetActivePlanAsync.
+        await _psGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _ps.RunProcessAsync("powercfg.exe", arg, ct, PowerShellRunner.OemEncoding).ConfigureAwait(false);
+        }
+        finally { _psGate.Release(); }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  RESTORE — revert to snapshot
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Restore all settings to the exact state captured in the snapshot.
+    /// This is the ONLY way to revert — we never guess defaults.
+    /// </summary>
+    public async Task RestoreFromSnapshotAsync(OriginalSnapshot snapshot, CancellationToken ct = default)
+    {
+        // Power plan — restore the exact original plan
+        if (!string.IsNullOrEmpty(snapshot.PowerPlanGuid))
+            await SetActivePlanAsync(snapshot.PowerPlanGuid, ct).ConfigureAwait(false);
+
+        // Visual effects
+        SetUiEffects(snapshot.UiEffectsEnabled);
+
+        // Game Mode
+        SetGameMode(snapshot.GameModeEnabled);
+
+        // Xbox Game Bar — restore each key from its own snapshot value; the two are
+        // independent (Game Bar overlay vs per-game DVR) and must not be collapsed.
+        SetXboxGameBar(snapshot.XboxGameBarEnabled, snapshot.XboxGameDvrEnabled);
+
+        // GPU
+        if (snapshot.NvidiaSubKey is not null)
+            SetGpuMaxPerformance(snapshot.NvidiaSubKey, !snapshot.GpuDynamicPstate);
+
+        // Processor state — only restore if we captured a real value. A null means the
+        // snapshot couldn't read the original minimum (e.g. an unparseable powercfg output),
+        // so writing anything would fabricate state; leaving it untouched is the safe choice.
+        if (snapshot.ProcessorMinPercentAc is int minPct)
+            await SetProcessorMinStateAsync(minPct, ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _psGate.Dispose();
+    }
+}

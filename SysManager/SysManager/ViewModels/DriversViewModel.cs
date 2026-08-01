@@ -1,0 +1,187 @@
+// SysManager · DriversViewModel
+// Author: laurentiu021 · https://github.com/laurentiu021/SystemManager
+// License: MIT
+
+using System.Globalization;
+using System.Text.Json;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Serilog;
+using SysManager.Helpers;
+using SysManager.Models;
+using SysManager.Services;
+
+namespace SysManager.ViewModels;
+
+public sealed partial class DriversViewModel : ViewModelBase
+{
+    private readonly IPowerShellRunner _runner;
+    private CancellationTokenSource? _cts;
+    private readonly List<DriverEntry> _allDrivers = new();
+
+    public BulkObservableCollection<DriverEntry> Drivers { get; } = new();
+
+    [ObservableProperty] private int _driverCount;
+    [ObservableProperty] private string _summary = "Click List drivers to scan installed drivers.";
+    [ObservableProperty] private bool _hideSystemDrivers;
+
+    public DriversViewModel(IPowerShellRunner runner)
+    {
+        _runner = runner;
+        // Re-evaluate ListDrivers' CanExecute when IsBusy flips. Without this gate a second
+        // click while a scan runs double-subscribes the LineReceived capture (concatenated
+        // JSON → JsonException) and recreates the shared _cts the first run is still awaiting.
+        // Mirrors AppUpdates/Uninstaller/WindowsUpdate.
+        PropertyChanged += OnVmPropertyChanged;
+    }
+
+    /// <summary>Gate for the long-running scan command; Cancel stays enabled.</summary>
+    private bool NotBusy => !IsBusy;
+
+    private void OnVmPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(IsBusy)) return;
+        ListDriversCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnHideSystemDriversChanged(bool value) => ApplyFilter();
+
+    [RelayCommand(CanExecute = nameof(NotBusy))]
+    private async Task ListDriversAsync()
+    {
+        IsBusy = true;
+        IsProgressIndeterminate = true;
+        StatusMessage = "Scanning installed drivers…";
+        Drivers.Clear();
+        _allDrivers.Clear();
+        _cts?.Dispose();
+        _cts = new CancellationTokenSource();
+
+        try
+        {
+            var json = new System.Text.StringBuilder();
+            void Capture(PowerShellLine l)
+            {
+                if (l.Kind == OutputKind.Output)
+                    json.AppendLine(l.Text);
+            }
+
+            _runner.LineReceived += Capture;
+            try
+            {
+                await _runner.RunScriptViaPwshAsync(@"
+                    Get-CimInstance Win32_PnPSignedDriver |
+                      Where-Object { $_.DeviceName -and $_.DriverVersion } |
+                      Select-Object DeviceName, DriverVersion, Manufacturer, DriverDate |
+                      ConvertTo-Json -Compress
+                ", cancellationToken: _cts.Token);
+            }
+            finally { _runner.LineReceived -= Capture; }
+
+            ParseDriverJson(json.ToString());
+            Summary = $"{_allDrivers.Count} drivers found" +
+                      (HideSystemDrivers ? $" ({DriverCount} shown, system drivers hidden)." : ".");
+            StatusMessage = "Done";
+            ToastService.Instance.Show("Driver scan complete", $"{_allDrivers.Count} drivers found");
+        }
+        catch (OperationCanceledException) { StatusMessage = "Cancelled."; }
+        catch (InvalidOperationException ex) { StatusMessage = ex.Message; }
+        finally { IsBusy = false; IsProgressIndeterminate = false; }
+    }
+
+    [RelayCommand]
+    private void Cancel() => _cts?.Cancel();
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            PropertyChanged -= OnVmPropertyChanged;
+            _cts?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    private void ParseDriverJson(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var root = doc.RootElement;
+
+            // PS returns an array if multiple, or a single object if only one.
+            IEnumerable<JsonElement> items = root.ValueKind == JsonValueKind.Array
+                ? root.EnumerateArray()
+                : [root];
+
+            foreach (var entry in items.Select(el => new DriverEntry
+            {
+                DeviceName = el.TryGetProperty("DeviceName", out var dn) ? dn.GetString() ?? "" : "",
+                Manufacturer = el.TryGetProperty("Manufacturer", out var mf) ? mf.GetString() ?? "" : "",
+                DriverVersion = el.TryGetProperty("DriverVersion", out var dv) ? dv.GetString() ?? "" : "",
+                DriverDate = ParseCimDate(el.TryGetProperty("DriverDate", out var dd) ? dd : default),
+            }))
+            {
+                _allDrivers.Add(entry);
+            }
+        }
+        catch (JsonException ex)
+        {
+            Log.Warning("Failed to parse driver JSON: {Error}", ex.Message);
+            StatusMessage = "Parse error — some drivers may not be shown.";
+        }
+
+        ApplyFilter();
+    }
+
+    private void ApplyFilter()
+    {
+        var filtered = HideSystemDrivers
+            ? _allDrivers.Where(d => !IsSystemDriver(d))
+            : _allDrivers;
+
+        Drivers.ReplaceWith(filtered);
+
+        DriverCount = Drivers.Count;
+        if (_allDrivers.Count > 0)
+            Summary = HideSystemDrivers
+                ? $"{_allDrivers.Count} drivers found ({DriverCount} shown, system drivers hidden)."
+                : $"{_allDrivers.Count} drivers found.";
+    }
+
+    private static bool IsSystemDriver(DriverEntry d)
+        => d.Manufacturer.Contains("Microsoft", StringComparison.OrdinalIgnoreCase) ||
+           d.Manufacturer.Contains("Windows", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// CIM dates come as "/Date(ticks)/" strings in JSON.
+    /// </summary>
+    private static DateTime? ParseCimDate(JsonElement el)
+    {
+        if (el.ValueKind == JsonValueKind.Null || el.ValueKind == JsonValueKind.Undefined)
+            return null;
+
+        var text = el.GetString();
+        if (string.IsNullOrWhiteSpace(text)) return null;
+
+        // "/Date(1234567890000)/" format
+        if (text.StartsWith("/Date(", StringComparison.Ordinal) && text.EndsWith(")/", StringComparison.Ordinal))
+        {
+            var ticksStr = text[6..^2];
+            // Handle timezone offset like /Date(1234567890000+0000)/
+            var plusIdx = ticksStr.IndexOf('+');
+            var minusIdx = ticksStr.IndexOf('-', 1);
+            var endIdx = plusIdx >= 0 ? plusIdx : (minusIdx >= 0 ? minusIdx : ticksStr.Length);
+            if (long.TryParse(ticksStr[..endIdx], out var ms))
+                return DateTimeOffset.FromUnixTimeMilliseconds(ms).LocalDateTime;
+        }
+
+        // Fallback: try standard parse
+        if (DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+            return dt;
+
+        return null;
+    }
+}

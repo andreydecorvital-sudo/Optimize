@@ -1,0 +1,144 @@
+// SysManager · DiskHealthReport
+// Author: laurentiu021 · https://github.com/laurentiu021/SystemManager
+// License: MIT
+
+using CommunityToolkit.Mvvm.ComponentModel;
+using SysManager.Helpers;
+
+namespace SysManager.Models;
+
+/// <summary>
+/// Friendly, per-disk health report derived from Windows Storage reliability
+/// counters (SMART-sourced). All fields nullable because not every driver
+/// exposes every counter.
+/// </summary>
+public sealed partial class DiskHealthReport : ObservableObject
+{
+    [ObservableProperty] private string _friendlyName = "";
+    [ObservableProperty] private string _mediaType = "";       // HDD / SSD / NVMe
+    [ObservableProperty] private string _busType = "";
+    [ObservableProperty] private double _sizeGB;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HealthPercent))]
+    [NotifyPropertyChangedFor(nameof(HealthPercentColorHex))]
+    private string _healthStatus = "";    // Healthy / Warning / Unhealthy
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HealthPercent))]
+    [NotifyPropertyChangedFor(nameof(HealthPercentColorHex))]
+    [NotifyPropertyChangedFor(nameof(TemperatureColorHex))]
+    [NotifyPropertyChangedFor(nameof(TemperatureGauge))]
+    private double? _temperatureC;
+
+    [ObservableProperty] private double? _temperatureMaxC;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HealthPercent))]
+    [NotifyPropertyChangedFor(nameof(HealthPercentColorHex))]
+    [NotifyPropertyChangedFor(nameof(WearGauge))]
+    [NotifyPropertyChangedFor(nameof(WearColorHex))]
+    private int? _wearPercent;            // 0 = new, 100 = worn out (SSD only)
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(PowerOnDisplay))]
+    private long? _powerOnHours;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HealthPercent))]
+    [NotifyPropertyChangedFor(nameof(HealthPercentColorHex))]
+    private long? _readErrors;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HealthPercent))]
+    [NotifyPropertyChangedFor(nameof(HealthPercentColorHex))]
+    private long? _writeErrors;
+    [ObservableProperty] private long? _startStopCount;
+    [ObservableProperty] private string _verdict = "";         // plain-English summary
+    [ObservableProperty] private string _verdictColorHex = StatusColors.Neutral;
+
+    /// <summary>
+    /// Overall health score 0–100 (100 = perfect). Computed from wear, temperature,
+    /// and error counts. Returns null when no SMART data is available.
+    /// </summary>
+    public int? HealthPercent
+    {
+        get
+        {
+            int score = 100;
+
+            if (WearPercent.HasValue)
+                score -= Math.Clamp(WearPercent.Value, 0, 100);
+
+            if (TemperatureC.HasValue)
+            {
+                if (TemperatureC.Value > 70) score -= 30;
+                else if (TemperatureC.Value > 60) score -= 15;
+                else if (TemperatureC.Value > 50) score -= 5;
+            }
+
+            if (ReadErrors is > 0) score -= (int)Math.Min(ReadErrors.Value * 5L, 20L);
+            if (WriteErrors is > 0) score -= (int)Math.Min(WriteErrors.Value * 5L, 20L);
+
+            if (!WearPercent.HasValue && !TemperatureC.HasValue && ReadErrors is null && WriteErrors is null)
+            {
+                return HealthStatus switch
+                {
+                    "Healthy" => 100,
+                    "Warning" => 60,
+                    "Unhealthy" => 20,
+                    _ => null
+                };
+            }
+
+            return Math.Clamp(score, 0, 100);
+        }
+    }
+
+    /// <summary>Color hex for the health percentage gauge.</summary>
+    public string HealthPercentColorHex => HealthPercent switch
+    {
+        null => StatusColors.Neutral,
+        >= 80 => StatusColors.Good,
+        >= 50 => StatusColors.Warning,
+        >= 20 => StatusColors.Elevated,
+        _ => StatusColors.Bad
+    };
+
+    /// <summary>Color hex for the temperature reading.</summary>
+    public string TemperatureColorHex => TemperatureC switch
+    {
+        null => StatusColors.Neutral,
+        <= 40 => StatusColors.Good,
+        <= 50 => StatusColors.Warning,
+        <= 60 => StatusColors.Elevated,
+        _ => StatusColors.Bad
+    };
+
+    /// <summary>Temperature as a 0–100 gauge value (0 °C = 0, 80 °C = 100).</summary>
+    public int TemperatureGauge => TemperatureC.HasValue
+        ? Math.Clamp((int)(TemperatureC.Value / 80.0 * 100), 0, 100)
+        : 0;
+
+    /// <summary>Wear as a 0–100 gauge value (inverted: 0 wear = 100% life remaining).</summary>
+    public int WearGauge => WearPercent.HasValue
+        ? Math.Clamp(100 - WearPercent.Value, 0, 100)
+        : 100;
+
+    /// <summary>Color hex for the wear gauge.</summary>
+    public string WearColorHex => WearPercent switch
+    {
+        null => StatusColors.Neutral,
+        <= 20 => StatusColors.Good,
+        <= 50 => StatusColors.Warning,
+        <= 80 => StatusColors.Elevated,
+        _ => StatusColors.Bad
+    };
+
+    /// <summary>Friendly power-on time display.</summary>
+    public string PowerOnDisplay => PowerOnHours switch
+    {
+        null => "—",
+        < 24 => $"{PowerOnHours}h",
+        < 8760 => $"{PowerOnHours / 24}d {PowerOnHours % 24}h",
+        _ => $"{PowerOnHours.Value / 8760.0:F1}y"
+    };
+}

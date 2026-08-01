@@ -1,0 +1,4400 @@
+# Changelog
+
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.56.3] - 2026-07-30
+
+### Security
+- **Prevented per-user backup data from authorizing elevated machine-wide registry changes.** Environment restore, introduced in v1.33.3, kept both User and Machine snapshots in a LocalAppData JSON file. An unprivileged process could edit that file and, when SysManager was later restored as administrator, choose valid Machine variable values and which Machine variables were deleted. New User snapshots now live under HKCU, while System snapshots are stored under an owner- and ACL-validated `HKLM\SOFTWARE\SysManagerEnvironmentBackup` key. Only that protected snapshot can drive HKLM restore; legacy LocalAppData data remains read-only compatibility input for User restore, and its `Machine` section is never migrated or trusted.
+
+### Fixed
+- **Rejected malformed environment backups before any restore write.** User and protected Machine snapshots are now parsed with bounded file, entry-count, name, value-length, and registry-kind validation. Null or missing sections, wrong JSON types, null values, duplicate names, unsupported registry kinds, and oversized content produce a safe invalid-backup result instead of a `NullReferenceException` or a partial restore.
+- **Preserved pristine backups across partial and scope-specific operations.** Present-but-invalid snapshots are never mistaken for missing data or overwritten, restore validates every present scope before its first write, and a System-only change no longer creates a User snapshot. Existing valid User files remain compatible, while new registry values publish atomically without an elevated write into a user-controlled filesystem path.
+
+## [1.56.2] - 2026-07-29
+
+### Security
+- **Blocked per-user PowerShell module hijacking in administrator sessions.** Since the initial v0.3.0 runner, both in-process runspaces and child `powershell.exe` processes inherited the caller's `PSModulePath`, whose first entry normally points to the current user's writable Documents folder. A planted module could therefore be auto-loaded with SysManager's administrator token when a built-in command such as `Get-NetAdapter` was resolved. Elevated in-process work now moves into an isolated Windows PowerShell 5.1 child whose environment contains only canonical machine-owned module roots under Program Files and System32; existing child-process execution receives the same restriction. Normal unelevated sessions retain per-user module support, and the parent process environment is never rewritten.
+
+### Fixed
+- **Kept optional Windows Update history installation on the correct privilege boundary.** SysManager now installs PSWindowsUpdate only from a normal, non-administrator session into the current user's module directory. The installer verifies the canonical PowerShell Gallery endpoint and explicitly selects `PSGallery`; an elevated session refuses the install instead of consuming user-writable PowerShellGet repository state with an administrator token. Failed module imports now expose installation guidance instead of reporting a successful empty history.
+- **Handled locked-down systems without a working Windows PowerShell 5.1 host.** If policy, installation damage, or a disabled executable prevents the isolated administrator runspace from starting, the runner now maps that failure to the existing unavailable/failed service states. External PowerShell launches remain pinned to the canonical system path even when the host is missing, preventing executable search-order fallback. The runner deliberately does not fall back to an elevated in-process runspace, which would weaken the module-discovery boundary.
+- **Preserved PowerShell parameter and task-result semantics.** Defender mutation scripts now declare every bound parameter instead of silently receiving null variables, and Scheduled Maintenance correctly decodes unsigned high-bit Task Scheduler result codes after out-of-process serialization.
+- **Reported partial elevated operations honestly.** Edge disable/restore now reports failure when its registry policy changes but scheduled-task updates cannot run, and restore-point creation returns a clean failure state when the isolated PowerShell host is unavailable.
+
+## [1.56.1] - 2026-07-28
+
+### Security
+- **Prevented the Uninstaller from acting as a privileged execution broker.** Scan remains available in an administrator session, but uninstall actions are disabled until SysManager is reopened normally. This applies to both direct registry commands and the WinGet route, so user-controlled package metadata can no longer inherit SysManager's elevated token.
+- **Hardened registry-command validation.** Trusted shared-data paths now come from the canonical Windows known folder instead of the mutable `ProgramData` environment variable. Local commands must identify the canonical absolute executable that is actually launched, bare `rundll32` payloads resolve only from System32, and Windows Installer product-code commands must match the complete supported argument grammar; appended packages, transforms, and other payloads are rejected.
+
+### Fixed
+- **Let each local uninstaller own its UAC request.** In an unelevated SysManager session, validated registry uninstallers now launch through the Windows shell. An uninstaller whose manifest requires administrator rights can therefore show its own Windows UAC prompt without requiring SysManager itself to remain elevated.
+- **Made cancellation and batch outcomes truthful.** Cancelling while WinGet or a local uninstaller is queued now prevents an unobserved process start, completed processes win a late cancellation race, cancelled or failed batches retain partial progress, and successful removals that require a restart are reported as success with restart guidance.
+
+## [1.56.0] - 2026-07-23
+
+### Added
+- **Notification Blocker — the last work-in-progress tab is now implemented** (Privacy & Security). Mute the apps that nag you with pop-up notifications — update reminders, trial offers, "rate us" prompts — without digging through Windows Settings:
+  - **Per-app mute switches** for every app Windows has recorded as a notification sender, sorted most-recently-active first and showing each app's recent notification count so the noisy ones stand out. Flipping a switch writes the same documented per-user setting as Windows Settings > System > Notifications — nothing is hooked, injected, or hacked, and Windows itself enforces the mute.
+  - **Master switch** to silence all notifications at once, with an explicit warning that it also mutes calendar and reminder alerts until turned back on.
+  - **Pending-changes flow** (like the Privacy & Telemetry tab): switch flips stay local until you press Apply, a confirmation summarises what changes, Discard backs out, and a failed write stays visibly pending instead of silently vanishing.
+  - Everything is per-user (no administrator), fully reversible by flipping the switch back, and searchable. App names resolve from Windows' own AppUserModelId registrations, falling back to a readable form of the sender ID.
+  - Scope note: the original idea (#340) included intercepting arbitrary pop-up windows; that requires manipulating other processes' windows — invasive, fragile, and malware-adjacent — so this tab deliberately sticks to the supported notification channel. Closes #340.
+
+## [1.55.1] - 2026-07-23
+
+### Fixed
+- **Cleared the last two CodeQL code-quality warnings, bringing the scanner to zero open findings.** Neither was a field-visible bug — both paths behaved correctly — but each code shape earned its warning and reads better fixed:
+  - *Temperature service (`cs/constant-condition`):* the one-time disk-name resolution used a double-checked lock (re-testing the cached field inside the semaphore), whose inner re-test CodeQL flags as a constant condition because it doesn't model the cross-thread race the re-test guards. Replaced with a plain "always take the gate, `??=` the cache" shape — an uncontended `SemaphoreSlim` acquire is trivial next to the SMART walk it guards, the race-safety is identical, and the flagged pattern is gone.
+  - *File shredder (`cs/local-not-disposed`):* the exclusive shred stream WAS disposed (via `DisposeAsync` in a `finally`), but the manual form isn't recognized by the analyzer. Converted to a scoped `await using` block — same semantics, including disposing the exclusive `FileShare.None` handle *before* the final `File.Delete` (which would otherwise fail while the handle is held) — a shape both humans and the analyzer read as safe.
+
+## [1.55.0] - 2026-07-22
+
+### Added
+- **Volume Control gained per-app output-device routing, saved presets, and a tray shortcut** — completing the per-app mixer (these were previously noted as planned).
+  - **Per-app output routing** — route one app to your headset and another to your speakers. Each app row shows an output-device picker where Windows exposes the routing interface; on builds where it doesn't, the row shows a "Choose output device…" button that opens Windows' per-app sound settings, so there's always a path. Routing is applied for the Multimedia and Console roles (Communications is left to the system so a device switch doesn't hijack call audio).
+  - **Volume presets** — save the current per-app volumes and mutes as a named preset (e.g. "Gaming", "Focus") and re-apply it in one click. Presets are keyed by executable name so they re-apply to whatever instance of an app is running across restarts, and are stored locally in `%LocalAppData%\SysManager\volume-presets.json`.
+  - **Tray shortcut** — a "Volume mixer" item in the system-tray menu opens SysManager straight to the Volume Control tab.
+  - Output-device enumeration uses the documented Core Audio device API. Per-app routing uses the undocumented `IAudioPolicyConfig` interface (the mechanism EarTrumpet uses); it is feature-detected and fully guarded — if it can't bind on this Windows build, the tab silently falls back to the guided path rather than failing. Preset logic and the device/endpoint string handling are unit-tested. Closes #332.
+
+## [1.54.0] - 2026-07-22
+
+### Added
+- **Bandwidth Monitor — a new Monitor tab that shows how much data is moving through your network and which apps are using it** (replaces the previous work-in-progress placeholder). It has two measurement modes so it's useful to everyone without forcing elevation:
+  - **Default (no administrator):** accurate machine-wide download/upload speed with a live rolling throughput chart (the last ~2 minutes), plus a per-app list attributed by active TCP/UDP connections — which programs are talking, how many connections each holds, and the remote ports involved. This reads the same connection tables Windows exposes to any user (`GetExtendedTcpTable`/`GetExtendedUdpTable`), so it needs no elevation and no setup.
+  - **Precise per-app rates (optional, administrator):** exact per-process upload/download speeds and per-session data totals (like Task Manager's Network column), captured from a Windows kernel ETW session. It's offered only when the app is already running as administrator, and if the kernel session can't start (privilege, a locked-down host, a blocked native helper) the tab logs it and falls back to the no-admin view — it never crashes because precise mode was unavailable.
+  - **Threshold alert:** set a Mbps limit and the tab warns when total download or upload exceeds it (useful for catching a runaway background upload); 0 turns the alert off.
+  - Strictly local and read-only — SysManager only observes network activity, never throttles or blocks it, and nothing about your traffic leaves the machine. Total-throughput history is stored as NDJSON under `%LocalAppData%\SysManager`. Closes #337.
+
+### Changed
+- Added the `Microsoft.Diagnostics.Tracing.TraceEvent` dependency (used only by the Bandwidth Monitor's optional precise mode). Its native helpers embed into the single-file build, so the shipped `SysManager-vX.Y.Z.exe` remains one self-contained file.
+
+## [1.53.0] - 2026-07-22
+
+### Added
+- **Edge/OneDrive Remover — a new Privacy & Security tab that takes Microsoft Edge and OneDrive out of your way, reversibly** (replaces the previous work-in-progress placeholder). Both of these are frequently-unwanted but awkward to deal with by hand, so the tab does it safely and offers a matching restore for every action:
+  - **OneDrive: full removal for your account, no admin needed.** Stops the running client, runs the official `OneDriveSetup.exe /uninstall`, and clears its File Explorer navigation-pane entry. Files already synced to the PC stay on disk; cloud-only files simply aren't downloaded. **Restore OneDrive** reinstalls it and re-pins the sidebar entry.
+  - **Edge: disable & de-integrate, never uninstall.** Windows relies on Edge (WebView2) and reinstalls it if forced out — and forcing it breaks other apps irreversibly — so the tab never uninstalls it. Instead it turns off Edge's background mode and startup boost (the documented `BackgroundModeEnabled` / `StartupBoostEnabled` Group-Policy values) and disables its two machine auto-update scheduled tasks, so Edge stops launching and running on its own; you can still open it normally. **Restore Edge** clears those policies and re-enables the update tasks. These changes are machine-scope and need administrator (the tab shows the standard golden admin banner explaining why); removing OneDrive does not.
+  - **Honest about the default browser.** Windows hash-protects the default-browser association, so no app can switch it programmatically; the tab opens Windows' default-apps settings and guides the user rather than pretending to change it.
+  - Every action confirms first with a plain-language impact summary and reports its honest outcome (done / needs administrator / not installed). The service routes all PowerShell and process launches through the shared runner seam with hard-coded scripts (no user input is ever interpolated — the Edge update-task names are a fixed, injection-safe allowlist), and its registry logic is unit-tested against a redirected hive. Closes #339.
+
+## [1.52.105] - 2026-07-22
+
+### Fixed
+- **A backslash in the Bulk Installer search box corrupted the winget search command.** `SanitizeQuery` stripped double quotes and control characters (so a search term couldn't inject extra arguments) but left backslashes untouched. Because the query is passed as `search "{term}"`, a term ending in a backslash turned the closing quote into an escaped quote (`search "foo\"`), collapsing the quoted-argument boundary and producing a malformed winget invocation (a broken or empty search). The sanitizer now also strips backslashes — a winget search term has no legitimate use for one — so the quoted argument can no longer be broken. Hardening at the input trust boundary; not remotely exploitable (winget arguments are passed as data, not through a shell), but the search now behaves correctly for any input.
+
+## [1.52.104] - 2026-07-21
+
+### Fixed
+- **The app built every one of its ~55 tab view-models at startup, even the tabs you never open.** `MainWindowViewModel` eagerly constructed all tab VMs up front, and most of them kick off real work in their constructor — a background scan, a poll timer, a WMI/registry query — so launching the app fired ~40 of those at once regardless of which tab you actually used (e.g. opening the app to the Dashboard still spun up Services, Drivers, Debloater, Bulk Installer and dozens more). Each tab's view-model is now built lazily, the first time its tab is opened (`NavItem` carries a `ContentFactory` that resolves the VM from DI on first access), so a fresh launch constructs only what the initial view needs. Startup tab-VM construction drops from ~55 to a handful. A deliberately small set stays eager because its constructor drives always-on, app-wide behavior that must run whether or not you open its tab: the Dashboard (the tab shown at launch), the Dark Mode scheduler (owns the theme-schedule poll), and About (its startup update-check feeds the title-bar version label and the "update available" banner). The four Network tabs also stay eager — they share a single network-state object and their constructors do no work. Behavior is otherwise identical; nothing is disabled, only deferred.
+
+## [1.52.103] - 2026-07-11
+
+### Accessibility
+- **Six admin-capable tabs showed no "Running as administrator" confirmation when the app was elevated.** Boot Analyzer, Gaming Profile, Settings Watchdog, Standby List Cleaner, Tweaks Hub and the Dashboard each had only the *not-elevated* banner (a grey "Run as administrator" prompt); when the app actually ran elevated the banner row simply collapsed, unlike the other 23 admin views which show a golden "Running as administrator — <what's unlocked>" confirmation. This broke the app's golden admin-control contract (grey when elevation is unavailable, golden when active) and the cross-tab uniformity the other views establish — most visibly on the hard-admin tabs (Boot Analyzer, Standby List Cleaner) where the core action requires elevation. Each of the six now shows the same golden elevated banner (matching `AppBlockerView`), with view-specific text describing what elevation unlocks, bound to `IsElevated` in the same grid row as the existing not-elevated banner.
+
+## [1.52.102] - 2026-07-11
+
+### Fixed
+- **Keyboard focus was invisible on every toggle switch.** The shared `ToggleSwitch` style set `FocusVisualStyle` to null but — unlike every other interactive style (buttons, TextBox) — had no `IsKeyboardFocused` trigger, so a keyboard user tabbing onto a switch (severity filters, performance tweaks, startup entries, Windows features, …) got no focus cue while Space still flipped it (WCAG 2.4.7). The switch's Track now shows an accent focus ring when focused, matching the button styles; a reserved transparent 1.5px border keeps the layout from shifting when it lights up.
+- **Windows Update category badges were unreadable on the light themes.** Seven of the eight category badge colors (Security, Defender, Driver, Servicing, .NET, Feature upgrade, default) were hardcoded pale dark-theme tints (~1.8:1 on the near-white light presets), while only "Cumulative" had been migrated to a theme brush. All eight now use per-preset status/badge brushes that `ThemeService` recomputes for light-theme legibility.
+- **The Logs tab's Critical severity card and two filter dots bypassed the per-preset color palette.** The Critical card's background/stripe/dot and the Error/Verbose filter dots were hardcoded (the Critical card's 8%-alpha red was near-invisible on light themes — the most severe category was the least visible), while the sibling Error/Warning/Info cards re-themed. Critical now uses new per-preset `CriticalText`/`CriticalBgSubtle` brushes, and the Error/Verbose dots use `Danger`/`TextMuted` — so all severity colors flow through one palette. The colorblind-safe ▲ glyph is unchanged.
+
+### Accessibility
+- **The DNS/Hosts "On" checkboxes and the Windows Update per-row select checkboxes had no accessible name**, so a screen reader announced an unnamed checkbox with no way to tell which host entry or update it toggled. Each now names its row (e.g. "Enable hosts entry example.com", "Select <update title>"), matching the App Updates / Shortcut Cleaner / Uninstaller grids.
+
+### Changed
+- **App Blocker tab's bottom gutter now matches every other tab** (root margin `28,24,28,16` instead of `28,24,28,0`), so its footer no longer sits flush against the window edge when switching tabs.
+
+## [1.52.101] - 2026-07-11
+
+### Fixed
+- **Reopening the theme popup on a saved custom theme showed the preset list instead of the color editors, and editing any one color silently reset the other three.** `SyncUiToService` checked the "Custom" mode radio for a persisted custom theme but never made the custom panel visible (the `Mode_Changed` handler that toggles panel visibility is wired up only afterward, and re-checking an already-checked radio raises no event), so the popup opened on the Presets list; the only way to reach the editors was to click Dark/Light — which immediately applied a preset over the custom theme — then Custom again. Worse, the four hex fields kept their XAML-default literals (`#6366F1`/`#070A0F`/`#0E1218`/`#F1F3F7`) and were never seeded from the saved theme, and `ApplyCustomFromInputs` reads all four on any field's `LostFocus` — so editing just the accent wrote the defaults for background/surface/text, destroying the user's saved custom colors on the next save. `SyncUiToService` now sets panel visibility (via a shared `UpdatePanels` helper `Mode_Changed` also uses) and, for a custom theme, seeds the four hex boxes and preview swatches from `ThemeService.CurrentTheme` so a single-field edit preserves the rest.
+
+## [1.52.100] - 2026-07-11
+
+### Fixed
+- **App Blocker could block SysManager's own executable, making the app impossible to relaunch and impossible to unblock from within the app.** `BlockApp` writes an IFEO `Debugger` redirection for any executable name that passes validation, and it already refuses a fixed set of boot-critical processes (`winlogon.exe`, `lsass.exe`, …) precisely because an IFEO block on those is unrecoverable — but SysManager's own executable was not protected. A user could block it trivially (the Browse button fills in the real file name of any picked `.exe`, or they could just type it), after which the next launch is redirected to the non-existent `System32\SysManager_Blocked.exe` and fails; because `UnblockApp` requires the app to be running, recovery then needs `regedit` — beyond the non-technical target user. `BlockApp` now refuses to block SysManager's own executable (resolved once from `Environment.ProcessPath`, matching both the dev name `SysManager.exe` and the released `SysManager-vX.Y.Z.exe`), enforced at the service trust boundary alongside the existing boot-critical guard.
+
+## [1.52.99] - 2026-07-11
+
+### Fixed
+- **The Gaming Profile crash-recovery sweep reverted the leftover session and rewrote its store without holding the service lock, so a quick Start click could race it.** On launch, if a previous run closed with game-mode tweaks still applied, the tab offers to revert them via `RecoverPendingAsync`. Unlike `ApplyAsync` and `RevertAsync` — which both serialize on the service's `SemaphoreSlim` (`_gate`) — `RecoverPendingAsync` ran its `RunRevertAsync` **and** its `LoadStore`→`SaveStore` completely ungated. After the user answered the "restore?" dialog the UI was live again, so clicking **Start** launched `ApplyAsync` concurrently with the still-running recovery revert: two paths reverting/applying the same machine-wide tweaks (power plan, visual effects, search indexing, notifications) and doing an unsynchronized read-modify-write of the on-disk store — which could lose the `ActiveSession = null` clear (resurrecting the leftover marker so it re-prompts forever) or interleave conflicting tweak steps. `RecoverPendingAsync` now acquires `_gate` for its whole body (mirroring `RevertAsync`, including the `ConfigureAwait(false)` that keeps the gate-release continuation off the UI thread so `Dispose`'s shutdown `_gate.Wait()` can't deadlock) and re-reads the store **inside** the gate so the read-modify-write is atomic against a concurrent `SaveStore`.
+
+## [1.52.98] - 2026-07-11
+
+### Fixed
+- **`winget` was launched by its bare name, which — despite the System32 path-pinning added for other tools — could still let an attacker-planted `winget.exe` run with the app's privileges (local privilege escalation).** Every winget operation (Bulk Installer install/list/search, App Updates upgrade, Uninstaller list) routes through `PowerShellRunner.RunProcessAsync("winget", …)`, which hardens the target via `SystemPaths.ResolveSystemTool`. But winget is not a System32 tool — it is an MSIX app whose real binary lives under `%ProgramFiles%\WindowsApps\Microsoft.DesktopAppInstaller_*__8wekyb3d8bbwe\winget.exe`, and whose only PATH entry is a per-user execution alias in the **user-writable** `%LOCALAPPDATA%\Microsoft\WindowsApps`. `ResolveSystemTool` probes only System32, so both probes missed and it returned the **unrooted** bare string `"winget"`. Launched with `UseShellExecute=false`, Win32 `CreateProcess` searches the calling process's **own load directory first** — so a `winget.exe` planted next to SysManager's portable .exe (commonly run from a user-writable Downloads folder, sometimes elevated via the prominent "Run as administrator" buttons on the winget tabs) would execute with the app's rights. The previously-relied-on `WorkingDirectory=System32` pin does **not** cover this: the working directory is search item #2, the app-load directory is #1. Added `SystemPaths.ResolveWinget`, which resolves winget to the highest-versioned App Installer package under the admin-only-writable `WindowsApps` folder (verified by publisher hash and by actually containing `winget.exe`) and **fails closed** — if no trusted install is found it returns a rooted `System32\winget.exe` path (which normally doesn't exist, surfacing the same `Win32Exception` the callers already handle) rather than the plantable bare name. `ResolveSystemTool` now delegates winget/winget.exe to it. The per-user `%LOCALAPPDATA%` alias is deliberately never used for the (potentially elevated) launch. This closes the last winget binary-planting vector left open after the v1.52.91 (`powershell`) and v1.52.92 (Bulk Installer CWD) hardening.
+
+## [1.52.97] - 2026-07-11
+
+### Fixed
+- **The Performance tab's system-mutating actions weren't serialized against each other, so "Restore All" could run while an "Apply" was still in flight and corrupt the reversible snapshot.** Every Apply command (power plan, visual effects, Game Mode, Xbox Game Bar, GPU, processor state) plus Restore All, Trim RAM, Create Restore Point and Toggle Hibernation is `async` and awaits real system work (registry writes, `powercfg`, `EmptyWorkingSet` across all processes). Nothing prevented a second command from starting mid-flight: the snapshot's own `SemaphoreSlim` only guards the load-modify of the `_snapshot` field, not the full apply→revert sequence. In the worst case, pressing **Restore All** while an Apply's registry write was still running let Restore All null `_snapshot` and delete the persisted baseline, leaving a tweak applied with nothing left to revert it (and other tabs that mutate the same system state — Tweaks, Cleanup's SFC/DISM — could interleave too). Every one of these ten commands now acquires the app-wide `OperationLockService` `SystemModification` lock (the same lock SFC/DISM and the Environment Variables editor already use) right after its confirmation dialog; if another system-modification operation is running, the command reports "Cannot start — <op> is already running." and bails before touching the system. Toggle-based commands re-sync their toggle from the live profile on that early return so the UI doesn't show a change that wasn't applied.
+
+## [1.52.96] - 2026-07-11
+
+### Fixed
+- **Disabling an all-users (Common) startup-folder item did nothing, and such items could show the wrong enabled/disabled state.** Both the per-user Startup folder and the all-users Common Startup folder were scanned and tagged with the same `StartupSource.StartupFolder`, so `ApplyApprovedState` read the enabled/disabled state for *all* folder items only from HKCU, and `SetEnabledAsync` wrote the toggle blob for *all* folder items only to HKCU. But Windows stores the `StartupApproved\StartupFolder` state for all-users shortcuts under **HKLM**, not HKCU. Consequences for a shortcut in `%ProgramData%\...\Startup`: an item disabled via Task Manager (HKLM blob) was shown as "Enabled", and disabling it in SysManager wrote the blob to HKCU where Windows never looks — so it returned success yet the program still launched at logon. Added a distinct `StartupSource.CommonStartupFolder` (set in `ReadStartupFolder` based on which special folder produced the entry); `ApplyApprovedState` now reads HKLM for common-folder entries, and `SetEnabledAsync` routes them to HKLM (which needs administrator — a non-elevated attempt surfaces the same "requires elevation" message the HKLM Run path already produces). Per-user folder items are unchanged.
+
+## [1.52.95] - 2026-07-11
+
+### Fixed
+- **Disabling a "run once" startup item in the Startup Manager reported success but did nothing — the item still ran at the next boot.** The scan lists both the `Run` and `RunOnce` registry keys, and `SetEnabledAsync` keyed purely off the entry's scope, so disabling a `RunOnce` entry wrote the "disabled" blob to `…\Explorer\StartupApproved\Run\{name}` and returned success. But Windows has no `StartupApproved\RunOnce` subkey and never consults `StartupApproved` for `RunOnce` keys, so the command still executed on the next boot while the UI showed "Disabled" — a system-mutation toggle that silently lied to the (non-technical) user. `SetEnabledAsync` now detects a `RunOnce` entry and returns a truthful non-success with a plain-language message ("Run-once item — runs next boot, then removes itself; cannot be disabled here.") instead of writing an ineffective blob. The item stays visible so the user still knows it's scheduled to run once.
+
+## [1.52.94] - 2026-07-11
+
+### Fixed
+- **The Dashboard's 2-second temperature poll re-ran a Win32_DiskDrive WMI query and a per-disk SMART association walk on every tick, purely to relabel storage sensors with (unchanging) disk names.** `RefreshTemperaturesAsync` calls `TemperatureService.ReadAllAsync()` with `includeStorage` defaulting to `true`; on an elevated session that ran `GetDiskNamesFromWmi()` (a `Win32_DiskDrive` query) **and** `EnrichStorageNamesAsync` → `DiskHealthService.CollectAsync()` (an `MSFT_PhysicalDisk` enumeration plus a per-disk `MSFT_StorageReliabilityCounter` walk — by the code's own comments "by far the heaviest part of a read") every 2 seconds while the Dashboard (the app's default tab) was open. Disk friendly-names are static hardware identity, so both resolutions are now memoized once (mirroring the existing `_nvApiInitTried` "resolve static hardware once" pattern), with a `SemaphoreSlim` gate making the first resolution race-safe across the 2s poll, the user's Refresh, and the 10s resource sampler. After the first read the hot poll only calls LibreHardwareMonitor's `Update()` for live temperatures.
+
+## [1.52.93] - 2026-07-11
+
+### Fixed
+- **The App Alerts tab froze the window while "Start Monitoring" took its baseline snapshot.** `StartMonitoring` was a synchronous command that called `AppAlertService.TakeBaseline()` directly on the UI thread — a walk of Program Files / Program Files (x86) / LocalAppData\Programs plus a full enumeration of both HKLM `Uninstall` registry trees (hundreds of subkeys), the same heavy scan the tab's own `RefreshInstalledAppsAsync` already offloads with `Task.Run`. On a machine with many installed apps or a slow disk the window hung for the whole scan. `StartMonitoring` is now an async command that runs `TakeBaseline()` + `Start()` on a background thread and resumes on the UI thread to set the monitoring state. This is safe: `FileSystemWatcher` creation is thread-agnostic and the service's `NewAppDetected` event is already marshaled via the `SynchronizationContext` captured at construction.
+
+## [1.52.92] - 2026-07-11
+
+### Fixed
+- **The Bulk Installer launched `winget` by bare name from a hand-built process with no pinned working directory, enabling binary-planting privilege escalation, and interpolated the raw search box text into the winget arguments (argument injection).** `MarkInstalledAppsAsync` (runs automatically on tab open) and the package search both built their own `ProcessStartInfo { FileName = "winget", UseShellExecute = false }` with **no `WorkingDirectory`**. With `UseShellExecute=false`, Win32 `CreateProcess` searches the calling process's own directory before resolving the real winget App Execution Alias — so an attacker-planted `winget.exe` beside SysManager's portable .exe (often run from a user-writable folder, sometimes elevated) would run with the app's privileges. Separately, the search argument was built as `$"search \"{query}\" …"` from the unvalidated search box — the one process-launch trust boundary in the app without input validation — so a query containing a double-quote could break out and inject extra winget arguments. Both winget calls now route through `BulkInstallerService` (the `IPowerShellRunner` seam), which launches winget with `WorkingDirectory` pinned to System32 (removing the CWD from the search order, matching every other winget call in the app), and the search query is sanitized (double-quotes and control characters stripped) before interpolation. This also brings the two calls into Gate-ARCH conformance — external process launches route through the single runner seam instead of a bespoke `ProcessStartInfo`.
+
+## [1.52.91] - 2026-07-11
+
+### Fixed
+- **`WindowsFeaturesService` launched PowerShell by the extension-less name `"powershell"`, defeating the System32 path-pinning that blocks binary-planting privilege escalation on an elevated code path.** All three call sites (`ListFeaturesAsync`, `EnableFeatureAsync`, `DisableFeatureAsync` — the enable/disable paths run elevated) called `RunProcessAsync("powershell", …)`. `PowerShellRunner` hardens the target via `SystemPaths.ResolveSystemTool`, but that helper resolved by `File.Exists` and only ever probed the bare name — `File.Exists(@"…\System32\WindowsPowerShell\v1.0\powershell")` is `false` (the file is `powershell.exe`), so both probes missed and it returned the **unrooted** `"powershell"`. With `UseShellExecute=false`, Win32 `CreateProcess` then searches the calling process's own directory first — so an attacker-planted `powershell.exe` next to SysManager's portable .exe (often run from a user-writable folder, sometimes elevated) would execute with the app's privileges. Changed all three sites to `"powershell.exe"` (matching `PowerShellRunner.RunScriptViaPwshAsync` and every other system-tool caller, which all use the `.exe` suffix). **Fix-the-class:** `SystemPaths.ResolveSystemTool` now also probes `"<name>.exe"` when given an extension-less bare name, so a future caller that forgets the suffix can't silently reopen the same hole.
+
+## [1.52.90] - 2026-07-10
+
+### Fixed
+- **A single transient WMI hiccup on startup could permanently show "Unknown CPU" / "Windows" / no disks / no RAM modules for the whole session.** `SystemInfoService` caches static hardware info with `??=`, but every `Query*` helper returned a **non-null** fallback on a WMI fault (`CpuInfo("Unknown", …)`, `OsInfo("Windows", …)`, an empty disk/module list). Because the fallback was non-null, `??=` stored it and never re-queried — so if the first `CaptureAsync` raced a transient WMI fault (plausible under the ~36-service startup load → `RPC server too busy`), the fallback defaults were cached process-wide (the service is a singleton) even after WMI recovered milliseconds later. The Dashboard, System Info tab, System Report and tray tooltip stayed stuck on the fallbacks until restart. Each `Query*` now returns `null` on a WMI **fault** (distinguished from a genuinely empty-but-successful result, which is still cached), so `??=` caches only a successful query and retries on the next poll; `Capture` uses a transient, non-cached default for the current snapshot only.
+
+## [1.52.89] - 2026-07-10
+
+### Fixed
+- **An environment variable added and applied, then deleted in the same session, could not actually be removed — it stayed orphaned in the registry while the pending-change counter got stuck.** `ApplyChanges` maintains two parallel maps: `_baseline` (drives the pending-change count) and `_originals` (the sole source for the deletion list). The delete loop removed the variable from both maps, but the add/edit loop updated only `_baseline` — so a freshly-added variable was never recorded in `_originals`. If the user then deleted that variable and pressed Apply again, `RecomputePending` (reads `_baseline`) counted it as a pending deletion and the UI showed "1 pending change", but `DeletedEntries` (reads `_originals`) didn't include it, so it was never deleted from the registry — leaving `PendingChangeCount` stuck at 1 and the variable orphaned. (A manual Refresh silently self-healed it by reloading `_originals`.) The apply loop now writes `_originals[Key(v)]` alongside `_baseline[Key(v)]` on a successful `SetVariable`, keeping the two maps in lock-step.
+
+## [1.52.88] - 2026-07-10
+
+### Fixed
+- **Deep Cleanup's "Clean selected" button stayed greyed-out after the first scan even though categories arrived pre-selected.** Scanned categories are pre-ticked (non-empty, non-destructive), but `ScanCoreAsync` repopulates the list with `Categories.ReplaceWith(...)` — a collection Reset that raises no per-item `PropertyChanged`. CommunityToolkit's `RelayCommand` re-raises `CanExecuteChanged` only via `NotifyCanExecuteChanged()`, so `CanClean` (`Categories.Any(c => c.IsSelected)`) was never re-evaluated and the button kept its initial disabled state — the user had to untick/retick a category to enable it. `ScanCoreAsync` now calls `CleanCommand.NotifyCanExecuteChanged()` right after `ReplaceWith`, mirroring how the per-item change handler already re-notifies.
+
+## [1.52.87] - 2026-07-10
+
+### Fixed
+- **Removing preinstalled apps in the Debloater could abort the whole batch and pop a raw error dialog if one app's uninstall faulted at the PowerShell-runspace level.** `RemoveSelectedAsync` awaited `DebloaterService.RemoveAsync` per app inside a loop guarded by a single `catch (OperationCanceledException)`. `RemoveAsync` catches only `System.Management.Automation.RuntimeException`, so a runspace-level fault (a failed runspace open → `PSInvalidOperationException`, which derives from `InvalidOperationException`, or a `Win32Exception` launching the host) escaped the loop, hit the global dispatcher `MessageBox` with a technical message, and left the remaining rows frozen at "Removing…" (the grid never refreshed). Each app's removal is now wrapped in its own `try/catch` for `InvalidOperationException`/`Win32Exception` — that one row is marked "Failed" and the batch continues — mirroring the guard `DefenderViewModel` already uses.
+- **The Dark Mode scheduler could flip the real Windows system theme on startup against a saved "app-only" preference.** `LoadFromSchedule` applies the saved settings through the `[ObservableProperty]` setters one at a time under the `_suppressSave` flag, but that flag only gated `SaveSchedule` — not `EvaluateSchedule`, which the `ScheduleEnabled`/`DarkStart`/`LightStart` change handlers also call. So during load the `ScheduleEnabled` setter ran `EvaluateSchedule` while `DarkStart`/`LightStart`/`ApplyToSystem` still held their defaults (`19:00`/`07:00`/`ApplyToSystem = true`), and `SetTheme` could write the wrong theme system-wide even for a user who chose app-only with a different schedule. `EvaluateSchedule` now returns early while `_suppressSave` is set; the constructor still runs one authoritative evaluation after load completes, so nothing is lost.
+
+## [1.52.86] - 2026-07-10
+
+### Fixed
+- **On a PC without winget (App Installer), the App Updates and Uninstaller tabs popped a raw OS-error dialog on their first action instead of a friendly message.** All winget calls launch `winget.exe` via `Process.Start`; when App Installer isn't present or its execution alias is off (common on older/LTSC/Server machines), that throws `Win32Exception` ("The system cannot find the file specified"). `AppUpdatesViewModel.ScanAsync`, `AppUpdatesViewModel.UpgradeSelectedAsync`, and `UninstallerViewModel.ScanAsync` caught only `OperationCanceledException`/`InvalidOperationException`, so the `Win32Exception` escaped the generated `AsyncRelayCommand` to the global dispatcher handler and surfaced as a bare OS-error dialog on the tab's very first action. (The sibling `UninstallerViewModel.UninstallSelectedAsync` already handled this — a missed migration of that fix.) All three now catch `Win32Exception` and show a shared plain-language message ("winget (App Installer) isn't available on this PC — install \"App Installer\" from the Microsoft Store to use this tab."). The upgrade batch stops on the first `Win32Exception` (winget won't reappear mid-run) and keeps the friendly message instead of a misleading "Updated 0 of N" summary.
+
+## [1.52.85] - 2026-07-10
+
+### Fixed
+- **Importing a config profile that omitted its `Sections` list crashed with an unhandled `NullReferenceException`.** `ConfigProfile.Sections` was a non-nullable positional record parameter, but System.Text.Json does not enforce non-null on positional params — so any syntactically-valid profile JSON lacking a `"Sections"` property (an empty `{}`, a truncated export, or foreign/hand-edited JSON chosen in the Import dialog) deserialized `Sections` to null. `ProfileViewModel.Import` then called `profile.Sections.Count`, throwing an NRE that escaped the surrounding try/catch (which only caught `IOException`/`UnauthorizedAccessException`/`NotSupportedException`) unhandled on the UI thread. `Sections` is now a defaulted `init` property (`= []`, matching the `CleanupResult.Errors` / `HealthScoreResult.Recommendations` idiom), and `ProfileService.Deserialize` also normalizes a null list to empty (mirroring `SettingsWatchdogService.LoadBaseline`) so the import path can always enumerate it safely.
+- **The PATH editor flagged every `PATHEXT` entry as a "missing directory", rendering the whole list in red.** `PATHEXT` is a `;`-separated list of file *extensions* (`.COM;.EXE;.BAT;…`), not directories, but `EnvVariable.IsPathLike` returned true for it and that single flag gated the editor's `Directory.Exists()` annotation — so each extension row was checked as a path (`Directory.Exists(".COM")` is false) and marked missing. Added a distinct `IsDirectoryList` (every path-like variable *except* `PATHEXT`) and gated the missing-directory annotation on it. `PATHEXT` still opens the reorderable list editor (`IsPathLike` is unchanged); its entries are simply no longer checked for directory existence.
+
+## [1.52.84] - 2026-07-10
+
+### Fixed
+- **Traceroute re-resolved the destination hostname on every probe, so a round-robin / CDN host could produce a garbled route toward different servers.** `TracerouteService.RunAsync` passed the raw hostname string into `Ping.SendPingAsync` inside the per-hop/per-probe loop, re-running DNS for each of up to `MaxHops * ProbesPerHop` (30×2 = 60) probes. For a load-balanced hostname (e.g. `google.com`), consecutive TTLs could resolve to *different* destination IPs, interleaving hops toward different servers into one nonsensical route — plus ~60× redundant DNS lookups. The destination is now resolved exactly once, up front, via a new `ResolveDestinationAsync` helper (IP literals are used verbatim with no DNS; hostnames pin the first `Dns.GetHostAddressesAsync` result), and every probe targets that fixed `IPAddress`. A resolution failure now surfaces as `InvalidOperationException` (the type the ViewModel already handles) instead of silently looping `MaxHops` times with per-probe DNS failures. Single-IP hosts and IP literals were never affected; the reverse-DNS lookup of each *responding* hop is unchanged.
+
+## [1.52.83] - 2026-07-10
+
+### Fixed
+- **Cancelling an Ookla speed test during the first-run CLI download was misreported as an error instead of "Cancelled".** `RunOoklaAsync` wrapped the prepare phase (`EnsureOoklaAsync` — download, extract, signature-verify) in a blanket `catch (Exception)` that re-threw everything as `InvalidOperationException("Could not prepare Ookla CLI: …")`. Because `OperationCanceledException` derives from `Exception`, a user cancel during the download/extract was converted into that error type, bypassing the ViewModel's dedicated `catch (OperationCanceledException) { OoklaStatus = "Cancelled"; }` handler — the user saw `Error: Could not prepare Ookla CLI: A task was canceled.` for a clean cancel. Cancellation now propagates untouched when the caller's token is signalled (an `OperationCanceledException` *without* the token signalled — HttpClient's internal 2-minute timeout — is reported as a truthful "download timed out" error), and the wrapping catch carries a `when (ex is not OperationCanceledException)` filter so cancellation can never be swallowed again.
+- **A failed cancel-kill of `speedtest.exe` could mask the cancellation and escape as an unhandled error.** The cancel path killed the child with `proc.Kill(entireProcessTree: true)` but only caught `InvalidOperationException`. `Kill(entireProcessTree: true)` also throws `Win32Exception` (process access-denied/terminating) and `AggregateException` (a descendant couldn't be terminated) — either one propagated *instead of* the intended `throw;`, so the original `OperationCanceledException` was lost and an exception type the caller doesn't handle escaped `RunOoklaAsync` entirely. Now uses the same three-exception filter as `PowerShellRunner`'s cancel-kill (`InvalidOperationException or Win32Exception or AggregateException`). The analogous `schtasks` timeout-kill in `StartupService.SetTaskSchedulerEnabledAsync` had the same gap — a `Win32Exception` from `Kill()` escaped to the outer catch, which mislabeled the timeout as "schtasks not available"; it now uses the same filter and reports the truthful "timed out" status.
+
+## [1.52.82] - 2026-07-10
+
+### Fixed
+- **Drive enumeration aborted entirely when a single volume's `DriveFormat` property threw (e.g. BitLocker-locked or transiently busy).** `FixedDriveService.Enumerate()` used a LINQ `.Where(di => ... di.DriveFormat ...)` predicate to filter drives to NTFS/ReFS. Because LINQ predicates evaluate lazily during `MoveNext()`, the `DriveFormat` property access ran OUTSIDE the per-drive try/catch block (which only covered the loop body). An `IOException` from one BitLocker-locked or transiently-busy volume caused the `IEnumerator.MoveNext()` call to throw, aborting enumeration of ALL remaining drives — even healthy ones. Callers (Deep Cleanup, System Health) saw zero drives instead of all-minus-one. Moved the `DriveFormat` filter inside the per-drive try block so one flaky volume is skipped (logged at Debug) while all remaining drives enumerate normally. The `DriveType` and `IsReady` checks remain in the predicate — those are backed by cached kernel data and do not hit the volume handle.
+
+## [1.52.81] - 2026-07-10
+
+### Fixed
+- **Event Logs tab's "Info" severity filter missed Level 0 (LogAlways) events.** Windows Event Log providers can emit events at Level 0 ("LogAlways" — informational events from legacy/classic providers). `MapLevel` correctly classifies Level 0 as `EventSeverity.Info` when reading records, but the XPath filter in `BuildXPath` used `SeverityToLevel(Info)` which returned only `Level=4`. This asymmetry meant the OS-side query for "Info" events excluded all Level-0 records from the result set — the user saw fewer informational entries than the system actually logged (commonly from providers like `Microsoft-Windows-Kernel-General`, `Service Control Manager`, and other classic providers in the System log). Added `SeverityToLevels` — the exact inverse of `MapLevel` — which maps Info to `{0, 4}`, and switched `BuildXPath` from `Select(SeverityToLevel)` to `SelectMany(SeverityToLevels)` so the generated XPath clause reads `(Level=0 or Level=4)` when the user selects Info.
+
+## [1.52.80] - 2026-07-10
+
+### Fixed
+- **Environment Variables restore/apply aborted partway through when encountering a variable name that passes the registry but fails the application's user-input validation regex.** Windows registries can legally contain environment variable names with spaces, `#`, `@`, `+`, `!`, leading digits, or the `=C:` pseudo-variable prefix — all of which fail `ValidateName`'s strict regex (`\A[A-Za-z_][A-Za-z0-9_.()\-]*\z`). `SetVariable` called the throwing `ValidateName` outside any try/catch, so `RestoreFromBackup` (which iterates all backed-up names) and the ViewModel's `ApplyChanges` loop both threw `ArgumentException` on the first non-conforming name — aborting mid-iteration and leaving the environment HALF-RESTORED (some variables written, others not, no rollback). Added a non-throwing `TryValidateName` that returns `false` for non-conforming names, and `SetVariable` now uses it to skip/count failures instead of throwing — the restore loop processes every valid variable and reports a failure count rather than aborting. Additionally, `EnvBackup` now records each variable's `RegistryValueKind` so that restores round-trip REG_EXPAND_SZ fidelity exactly instead of re-deriving it from a `%`-contains heuristic (which misclassifies expandable variables whose current value happens not to contain a percent sign).
+
+## [1.52.79] - 2026-07-10
+
+### Fixed
+- **Self-update installer had a TOCTOU (time-of-check/time-of-use) local privilege escalation window.** `InstallUpdateAsync` verified the downloaded binary's SHA-256 hash via `VerifyHashAsync` (which opened and closed its own file handle) and `VerifyAuthenticode` (likewise), then launched the same path with `Process.Start(UseShellExecute=true)` — reopening the file a third time with no handle held across the verify-to-execute gap. Because the download directory is user-writable (`%LOCALAPPDATA%\SysManager\updates\`), a same-user process could swap the verified binary for a malicious payload in the microseconds between the final verification close and the `CreateProcess` open. When SysManager ran elevated (Run as Administrator), `UseShellExecute=true` inherited the caller's high-integrity token, giving the swapped binary admin privileges — a local elevation-of-privilege. The fix opens the downloaded file once with `FileShare.Read` (deny-write) before any verification begins, hashes directly from that held stream via a new `VerifyHashAsync(ReleaseInfo, Stream)` overload, and keeps the handle open through `Process.Start`. The OS allows `CreateProcess` to read-open the image (compatible with `FileShare.Read`) but blocks any write attempt while the lock is held, closing the TOCTOU window completely.
+
+## [1.52.78] - 2026-07-10
+
+### Fixed
+- **Hosts file manager silently deleted standalone comments starting with a digit or colon (e.g. "# 5G adapter notes", "# 1. Block ads") and failed to recognize disabled IPv6 entries whose address starts with a hex letter (e.g. "# fe80::1 myserver").** The internal `LooksLikeIpStart` heuristic only checked whether the first character after `#` was a digit or colon — a crude approximation that disagreed with the real acceptance test (`IPAddress.TryParse` + two-token minimum) in both directions. (1) False negatives: IPv6 addresses starting with `a`–`f` (like `fe80::`, `fd00::`) failed the heuristic, so those disabled entries were invisible in the grid (no data loss — they survived as comments — but could not be re-enabled through the UI). (2) False positives: digit-or-colon-leading comments passed the heuristic (line 71) and were treated as candidate entries, but then failed `IPAddress.TryParse` (line 86) and fell through both code paths — they were neither parsed as entries nor preserved as standalone comments, causing silent data loss on the next save. Replaced with `IsDisabledEntryLine` that mirrors the parser's own logic: strip inline comment, split on whitespace, require `tokens.Length >= 2 && IPAddress.TryParse(tokens[0], out _)`.
+
+## [1.52.77] - 2026-07-10
+
+### Fixed
+- **DNS "Undo" could silently apply the previous configuration to the wrong network adapter if network topology changed between Apply and Undo (e.g. VPN connected, USB NIC plugged in, Wi-Fi toggled).** The `DnsSnapshot` record captured the DNS addresses but not the identity of the adapter they belonged to. At restore time, `RestoreSnapshotAsync` re-queried for the "currently active" adapter using the same lowest-ifIndex heuristic — which could resolve to a completely different NIC than the one originally configured. The snapshot now pins the adapter's interface index at capture time (`IfIndex` field); restore targets that specific adapter directly and verifies it still exists before applying, throwing a clear user-facing message if it was removed rather than silently reconfiguring the wrong interface. Legacy snapshots (pre-existing code paths that don't carry an index) fall back to the dynamic lookup so backward compatibility is preserved.
+
+## [1.52.76] - 2026-07-10
+
+### Fixed
+- **App icon cache loading crashed on corrupt PNG/JPEG files that trigger WIC codec errors.** `AppIconService.LoadFromFile` caught `NotSupportedException`, `IOException`, and `UriFormatException`, but `BitmapImage.EndInit()` throws `FileFormatException` (derives from `FormatException`, not `IOException`) for malformed image headers and `ExternalException` for native WIC decoder failures. Both are now caught, matching the established pattern in `IconExtractorService` (lines 203/234). Without this fix, a single corrupt cached icon file caused the entire app-icon load path to throw unhandled to the caller.
+- **File Shredder failed on read-only files when invoked for a single file (not via folder shred).** `ShredFileAsync` opened a write stream (`FileAccess.Write`) without first clearing the `ReadOnly` attribute, throwing `UnauthorizedAccessException`. `ShredFolderAsync` already stripped ReadOnly (lines 213-215) before calling `ShredFileAsync`, but the ViewModel's single-file path (`FileShredderViewModel:170`) called `ShredFileAsync` directly — the file survived with its data intact while the UI reported "Failed". The ReadOnly strip now lives inside `ShredFileAsync` itself so both entry points are covered.
+- **Memory health scan returned partial or empty results when any single RAM module reported a `DBNull` property.** `MemoryTestService` used `Convert.ToDouble(mo["Capacity"] ?? 0)` and `Convert.ToUInt32(mo["Speed"] ?? 0u)` — the `??` operator does not catch `DBNull.Value` (which is non-null), so `Convert.ToUInt32(DBNull.Value)` throws `InvalidCastException`. The catch block for that exception sat OUTSIDE the `foreach` loop, so one problematic module aborted the entire scan. Now uses `FixedDriveService.ToDoubleSafe`/`ToUInt32Safe` (DBNull-aware, already tested) and the defensive catch wraps each individual module so remaining modules are still reported.
+- **Flaky test (`ContextMenuViewModelTests.Constructor_TotalCount_DefaultsToZero`) that raced the ViewModel's constructor-initiated async registry scan.** On CI, the scan could complete before the assertion checked, producing `Expected: 0, Actual: 6`. Replaced all four timing-dependent baseline tests with post-scan invariant assertions that await `InitializationComplete` — the same deterministic pattern used by 16 other VM test classes.
+
+## [1.52.75] - 2026-07-10
+
+### Fixed
+- **Disk Analyzer over-counted drive usage by descending into WinSxS and other heavyweight system directories during recursion.** The `SkipSegments` filter (`\windows\winsxs`, `\windows\csc`, `\$recycle.bin`, `\system volume information`) was only applied to the top-level children of the analyzed root (line 71). The recursive `MeasureFolder` walk pushed every non-reparse subdirectory onto the stack without re-checking against `SkipSegments`, so scanning a drive root like `C:\` would enter `C:\Windows` (not skipped — it's not in the list) and then descend into `C:\Windows\WinSxS` (a hardlink farm, not a reparse point) and `C:\Windows\CSC` (offline files cache), double-counting hundreds of thousands of hardlinked files at full `FileInfo.Length`. The recursive loop now guards each subdirectory with `ShouldSkip(d)` before pushing it, matching the top-level behavior.
+
+## [1.52.74] - 2026-07-10
+
+### Fixed
+- **RestartExplorer could leave the user without a taskbar/desktop if any explorer.exe process was unkillable (e.g. elevated or another user's session).** The kill loop and the shell relaunch lived in a single try block, so one `Win32Exception` from `Kill()` on a higher-integrity explorer aborted the entire method — explorer was dead but never relaunched. Each process is now killed in its own guarded block (matching `FileLockService.KillProcess`'s per-process pattern), and the `Process.Start("explorer.exe")` relaunch runs unconditionally after the loop so the shell is always restored.
+- **The Context Menu tab's "Enable" action on HKLM-disabled entries reported success but actually did nothing.** The HKCU fallback path used `CreateSubKey` even when enabling (removing `LegacyDisable`), which created an empty orphan key and deleted a value that never existed there, then returned `true`. The HKLM `LegacyDisable` was never touched, so Explorer still hid the entry and the next scan snapped the toggle back. The enable path now uses `OpenSubKey` and returns `false` if no user-authored override exists to clear — surfacing the "needs admin" message instead of silently lying.
+- **Every Context Menu toggle froze the UI thread for up to 5 seconds.** `ToggleEntry` was synchronous and called `BackupRegistry` which spawns `reg.exe` with a 5-second `WaitForExit` — all on the dispatcher thread. Converted to an async command with `Task.Run`, matching the existing `ApplyPresetAsync` pattern that already offloads the same service calls for exactly this reason.
+
+## [1.52.73] - 2026-07-10
+
+### Fixed
+- **The Process Manager can no longer force-kill kernel-critical processes (csrss, lsass, smss, services, wininit, etc.) that would cause an immediate BSOD.** The Kill command was the only destructive surface in the app that did not guard against acting on a known-critical target — unlike the Services tab (which refuses to stop/disable critical services) and the File Lock tab (which refuses to end critical lockers). It now refuses outright when the process is classified as "System" in the process database, and as defense-in-depth also checks against a hardcoded boot-critical denylist so protection holds even for processes not yet in the database.
+
+## [1.52.72] - 2026-07-10
+
+### Fixed
+- **Several services and ViewModels depended on the concrete PowerShellRunner class instead of the IPowerShellRunner interface, making them impossible to unit-test in isolation.** UninstallerService, WindowsFeaturesService, PerformanceService, ServiceManagerService, CleanupViewModel, DriversViewModel, SystemHealthViewModel, WindowsUpdateViewModel, and ServicesViewModel all accepted a concrete PowerShellRunner in their constructors. This prevented substituting a mock in tests (NSubstitute cannot proxy sealed concrete classes) and violated the dependency-inversion principle the rest of the codebase already follows. All ten consumers now depend on IPowerShellRunner, and the redundant concrete-only DI registration was removed — every resolution goes through the interface mapping.
+
+## [1.52.71] - 2026-07-10
+
+### Fixed
+- **The Dashboard and App Updates tabs could cross-talk when both ran winget at the same time.** Both tabs shared a single winget service instance (and therefore a single underlying process runner). If the Dashboard's "Update All Apps" action ran while the App Updates tab was scanning, the output lines from one operation could bleed into the other tab's console, and the interleaved event subscriptions could produce garbled results or swallowed lines. Each tab now receives its own independent winget service with its own process runner, so concurrent winget operations are fully isolated.
+
+## [1.52.70] - 2026-07-10
+
+### Fixed
+- **The Startup tab could throw an error when toggling items while the "Hide Windows entries" filter was changed at the same time.** After enabling or disabling a startup item (or using "Enable all"), the tab finished its work on a background thread and then recounted the list from there. If the list was being re-filtered on the screen at that exact moment (for example, by ticking "Hide Windows entries"), the background recount could read the list while it was changing and fail. The work now finishes back on the screen's own thread — matching how the Services tab already does it — so the two can no longer collide.
+
+## [1.52.69] - 2026-07-10
+
+### Fixed
+- **GPU temperature could stop being reported for the rest of a session on some NVIDIA machines.** The Dashboard reads temperatures from several places at once (the 2-second temperature tile, the manual Refresh button, and the always-on resource-history sampler). On a non-administrator session the NVIDIA read path set up its GPU connection without the guard the other sensor path already used, so two of those reads starting at the same moment could collide during that one-time setup — and if the colliding attempt failed, the app remembered "no NVIDIA GPU" permanently and quietly dropped GPU temperature until the app was restarted. That setup is now serialized behind the same lock the rest of the temperature reading already uses, so simultaneous reads no longer collide and a transient collision can't disable GPU temperature for the session.
+
+## [1.52.68] - 2026-07-10
+
+### Security
+- **Built-in Windows repair tools are now launched by their full trusted system path instead of by name.** Several maintenance actions started Windows' own tools by name only (the SFC / DISM / CHKDSK / network helpers behind the repair tabs, the scheduled-task and registry edits behind the Context Menu and Startup tabs, the memory-diagnostic scheduler, and the auto-logon dialog on the System Fixes tab). When a program is started by name with a direct (non-shell) launch, Windows searches the application's own folder before the system folder — so if SysManager were run as a portable copy from a folder other programs can write to (for example, a Downloads folder) with administrator rights, a look-alike file planted there under the same name could have run in place of the real Windows tool, inheriting those rights. SysManager now resolves these tools to their protected `System32` location before launching them, so a planted look-alike can no longer take their place.
+
+## [1.52.67] - 2026-07-09
+
+### Changed
+- **The sidebar "administrator" badge now uses the amber/gold admin colour instead of purple.** When SysManager runs elevated, the shield in the sidebar footer turned purple — but purple is the app's primary-action colour, while the admin/elevation cue is amber everywhere else (the "Run as administrator" buttons and banners). The shield now matches that amber, so the elevation cue is consistent across the app.
+- **The Logs cards now use the shared large corner-radius token** instead of a slightly different hard-coded value, so their rounding matches the other cards.
+
+### Added
+- **The "Run as administrator" buttons now show a keyboard-focus outline.** They were missing the focus cue the other buttons already have, so keyboard users couldn't tell when one was focused; they now show an amber focus ring that matches the button's colour.
+- **Completion notifications (toasts) are now announced by screen readers and can be dismissed with the keyboard.** The toast is now a live region — assistive technologies read it aloud when it appears — and its close control is a real button (keyboard-focusable, Enter/Space to dismiss) rather than a mouse-only target.
+
+## [1.52.66] - 2026-07-09
+
+### Fixed
+- **The Windows Update tab no longer lets a module action run at the same time as another update operation.** Its "Check module" and "Install PSWindowsUpdate module" actions share the tab's single background engine and console with the Check-for-updates / History / Install-updates operations, but — unlike those — their buttons stayed enabled while another operation was running, so starting one could interleave its output on the shared console. They are now disabled while any update operation is in progress, matching the rest of the tab.
+
+## [1.52.65] - 2026-07-09
+
+### Fixed
+- **The Cleanup tab no longer lets two repairs use its console at the same time.** Temp Cleanup and the SFC / DISM system repairs all stream their output into the tab's single console, but only SFC and DISM were stopped from running together — Temp Cleanup could still be started while SFC or DISM was running (they use different internal locks), so their output could interleave in the console. Starting any of the three while another is using the console is now declined with a clear message until the first finishes. (Emptying the Recycle Bin is unaffected — it doesn't use the console.)
+- **Dragging the theme shade (background-brightness) slider no longer rewrites the theme file on every tick.** Each tiny movement saved the theme settings to disk; the shade still updates instantly, but the save now happens once you settle on a position instead of many times during a single drag.
+
+### Added
+- **Dashboard buttons now expose their names to screen readers.** The Quick Tune-Up button, the four Quick Actions (Run Quick Cleanup, Update All Apps, Check Windows Updates, Run Speed Test), and the temperature "Run as administrator" button are icon-and-text buttons that didn't carry an accessible name; they now do, so assistive technologies announce what each button does.
+
+## [1.52.64] - 2026-07-09
+
+### Fixed
+- **The System Fixes output now uses the same live console as the rest of the app.** Its repair output was rendered with a slower approach that rebuilt the entire text on every new line and updated the UI thread line-by-line. It now uses the shared, capped, timestamped console control that the App Updates, Windows Update, and Cleanup tabs already use — smoother during long repairs, and consistent with those tabs (same Clear / Copy / Auto-scroll controls).
+
+## [1.52.63] - 2026-07-08
+
+### Fixed
+- **The App Updates console no longer shows winget output from other tabs.** App Updates listened for winget output for as long as the app was open, and it shares one winget engine with the rest of the app — so running "Update All Apps" from the Dashboard (or any other winget action) quietly appended that output to the App Updates console. It now listens only while its own Check-for-updates or Update runs, so the console shows only what you started from that tab.
+
+## [1.52.62] - 2026-07-08
+
+### Fixed
+- **The Performance tab no longer briefly freezes when you apply Visual Effects, Game Mode, Xbox Game Bar, or GPU settings.** These four toggles wrote to the registry (and, for visual effects, broadcast a system-wide settings change) directly on the UI thread, so the window could hang for a moment while the change was applied. They now run that work off the UI thread and show the progress/busy indicator while they do — matching how the Power Plan and Processor State toggles on the same tab already behave. What each toggle does is unchanged.
+
+## [1.52.61] - 2026-07-08
+
+### Fixed
+- **The Process Manager can no longer show — or end — the wrong process when Windows reuses a process ID.** The list refreshes every second and matched rows by process ID (PID) alone, but Windows recycles PIDs, so between two refreshes the same PID can belong to a different program. When that happened, the row kept the old program's name and icon while showing the new program's activity — and because Kill targets the PID, confirming "End task" on that row would have ended the new program instead. Rows are now matched by PID together with the process start time, so a recycled PID is treated as a new process (old row removed, new one shown) and End task always acts on the process you see.
+
+## [1.52.60] - 2026-07-08
+
+### Fixed
+- **The live resource-history charts no longer leak a small amount of memory each time they're rebuilt.** Each chart axis uses a "Segoe UI" font handle; when the chart was torn down and re-created (for example on a theme change), those font handles weren't released — only the paint objects were. They're now freed alongside the paints, the same way the chart legend's font already was.
+- **Selecting a task in Task Scheduler no longer runs its "last run / next run" lookup twice.** Picking a task looked up its run details, and updating the row with those details re-triggered the selection handler, firing the same lookup a second time. The selection update is now guarded so the lookup runs once per selection.
+
+## [1.52.59] - 2026-07-08
+
+### Fixed
+- **Cancelling a PowerShell-backed operation now ends cleanly instead of risking a stray error.** Two cases: cancelling an in-process PowerShell run reported the stop as a low-level pipeline error rather than a normal "cancelled", so callers watching for cancellation could treat it as a failure; and when cancelling an external PowerShell process, the attempt to stop its process tree only handled one of the errors it can raise, so an access-denied or partially-failed stop could surface as an unhandled error. Both now resolve to the standard "operation cancelled" outcome and swallow the expected stop-time errors.
+
+## [1.52.58] - 2026-07-08
+
+### Fixed
+- **The Tweaks Hub no longer reads its settings on the UI thread while the app is starting.** The tab builds its Essential/Advanced tweak lists from registry-backed values; that read ran synchronously as the app started (the tab is created eagerly), adding to startup delay. It now runs off the UI thread and fills the list when ready — matching the Privacy Toggles tab — so there's no visible change, just a smoother start. Refresh runs off-thread too.
+- **The Battery Health tab can no longer start a second read on top of its own startup scan.** The tab reads battery data automatically when it opens, but the Refresh button stayed enabled during that first read, so pressing it could run two reads at once. Refresh is now disabled while a read is in progress, matching the other tabs.
+
+## [1.52.57] - 2026-07-08
+
+### Fixed
+- **Three background operations now fail safely instead of risking an unhandled error.** Ending a process could throw an unhandled error when part of its child-process tree refused to close — the Process Manager now reports that as a normal "couldn't end it" result. And loading the saved Speed Test history or the stored performance-tweak baseline could throw if the file was momentarily unreadable (locked or permission-denied) rather than access-denied being treated like any other read error; both now fall back cleanly (empty history / fresh baseline), matching how saving already behaves.
+
+## [1.52.56] - 2026-07-08
+
+### Fixed
+- **Applying and restoring Environment Variables can no longer run at the same time and leave a mixed result.** Since 1.52.51 the slow parts of Apply and Restore run off the UI thread, which keeps the window responsive — but it also meant that starting a Restore and then pressing Apply (or the reverse) could rewrite the user and system variables from both operations at once, leaving the environment in an unpredictable mix of the two. Apply and Restore now take the same app-wide system-modification lock the SFC/DISM tools use, so one waits with a clear message until the other finishes. Introduced in 1.52.51.
+
+## [1.52.55] - 2026-07-08
+
+### Fixed
+- **Shredding a folder that contains a junction or symlink can no longer delete an empty directory outside the folder you selected.** When removing the emptied directories after a folder shred, SysManager listed sub-directories with a recursive scan that follows junctions and symbolic links — so a link inside the selected folder that pointed elsewhere was followed, and an empty directory at its target (outside your selection) could be removed. The cleanup now skips junctions and symlinks exactly like the file-shredding pass already does: it never descends through a link and only ever removes empty directories inside the folder you chose. Introduced in 1.52.47 with the folder-shred cleanup rewrite; no file contents were ever at risk — only empty directories, and only through a link located inside the selected folder.
+
+## [1.52.54] - 2026-07-08
+
+### Fixed
+- **The Process Manager stops re-reading each program's static details every second.** On every 1-second refresh the process list read each process's description, executable path and file-existence check — even for the (often hundreds of) processes it was already showing and whose details it keeps unchanged. It now reads those static details only for processes that have just appeared and refreshes only the live metrics (CPU, memory, threads, status) for the rest, cutting the per-tick work substantially on machines with many processes.
+
+## [1.52.53] - 2026-07-08
+
+### Fixed
+- **System-info refreshes now make one Windows query instead of two.** Each refresh read the current uptime and the memory totals with two separate WMI queries against the same OS object; they are now fetched in a single query, one fewer round-trip per poll. No visible change — the same uptime and memory figures.
+
+## [1.52.52] - 2026-07-08
+
+### Fixed
+- **The File Shredder queue can no longer be changed while a shred is running.** During a shred, the Add Files, Add Folder and Remove buttons stayed active, and the shred walked the live queue by index across each file's overwrite — so adding or removing an item mid-shred could skip an item, act on the wrong one, or error. The shred now works on a snapshot of the queue taken when it starts, and the add/remove buttons are disabled until it finishes.
+
+## [1.52.51] - 2026-07-08
+
+### Fixed
+- **The Environment Variables tab no longer freezes the app while applying, restoring, or refreshing.** Applying changes broadcasts a system-wide "settings changed" message that waits up to 5 seconds for other windows to respond, and restoring or refreshing re-reads every user and system variable — all of which ran on the UI thread, freezing the whole window until they finished. The slow parts (the broadcast, the restore, and the full re-read) now run off the UI thread, so the app stays responsive; the actual variable writes are unchanged.
+
+## [1.52.50] - 2026-07-08
+
+### Fixed
+- **The Dashboard does less redundant work at startup and while polling.** Two efficiency fixes, both leaving what you see unchanged: (1) the live GPU tile re-enumerated all physical GPUs through the NVIDIA API on every 300 ms poll — it now resolves the GPU once and reads usage/memory from that cached handle each tick; (2) the health score's heavy disk-SMART/memory/battery computation ran three times at startup (the Dashboard's own load plus the SMART and memory alert scans, two of them at once) — the alert scans now reuse the score the Dashboard already computed, falling back to a fresh computation only if that load failed.
+
+## [1.52.49] - 2026-07-08
+
+### Fixed
+- **GPU temperature polling no longer re-initializes the NVIDIA API every couple of seconds — and no longer throws once per poll on PCs without an NVIDIA GPU.** The temperature reader called NVIDIA's `Initialize()` and re-enumerated GPUs on every poll (about every 2 seconds). On a machine with no NVIDIA GPU that raised and swallowed an exception on every single poll; on NVIDIA machines it redid the one-time setup each time. SysManager now initializes the NVIDIA API at most once, remembers whether an NVIDIA GPU is present, and skips the read entirely afterwards when there isn't one — so there's no per-poll exception and no repeated setup. GPU temperatures on NVIDIA machines are unchanged.
+
+## [1.52.48] - 2026-07-08
+
+### Fixed
+- **Starting or stopping a Windows service from the Services tab no longer risks a cross-thread error.** After a start/stop completed, SysManager refreshed the service row and the on-screen status from a background thread — unlike the Enable/Disable actions in the same tab, which correctly resume on the UI thread. Updating UI-bound state off the UI thread can raise a cross-thread exception. Start and Stop now resume on the UI thread just like Enable and Disable, so the row and status update safely.
+
+## [1.52.47] - 2026-07-08
+
+### Fixed
+- **Shredding a folder no longer plain-deletes (leaving recoverable) any file it could not securely overwrite.** When shredding a folder, a file that could not be securely overwritten — for example a locked or permission-denied file, or a hard-linked file the shredder now refuses — was still removed by the final recursive folder delete. That plain delete leaves the data recoverable while the operation reported success, so you could believe such a file had been securely erased. SysManager now leaves any file it could not securely overwrite in place (removing only the emptied folders around the files it did shred) and reports how many were left, so the outcome is honest.
+
+## [1.52.46] - 2026-07-08
+
+### Fixed
+- **The File Shredder now refuses to shred a file that has more than one hard link, instead of destroying data shared with other locations.** A file can have several names (hard links) that all point at the same data — including names outside the folder you selected, or a link that shares a protected system file's data. Overwriting the file's bytes to "shred" it would have destroyed that shared data everywhere, and the safety check that blocks system paths only sees the name you picked (it cannot tell the data is shared). The shredder now detects multiple hard links up front and refuses with a clear message, leaving every copy intact; remove the extra links first, or delete the file normally.
+
+## [1.52.45] - 2026-07-08
+
+### Fixed
+- **The System Info snapshot no longer risks an unhandled error on systems where the modern disk-info source is unavailable.** When the Windows Storage management interface cannot be reached (some older or minimal Windows installations), SysManager falls back to the classic disk query — but that fallback ran without its own error handling, so a second failure there (or a malformed size value from one drive) could surface as an unhandled error instead of simply showing the disk list it managed to read. The fallback is now guarded like every other hardware query: a fault degrades to the partial disk list, and a single unreadable drive is skipped rather than aborting the whole snapshot.
+
+## [1.52.44] - 2026-07-08
+
+### Fixed
+- **Cancelling a duplicate-file scan now reports it as cancelled instead of showing partial results as "Complete."** If you stopped a duplicate scan between files (rather than while a file was being hashed), the scan quietly finished and presented whatever it had found so far as a completed result. It now treats cancellation consistently — the scan reports as cancelled and no partial list is shown as if it were the full result — matching how the Large Files scan already behaves.
+
+## [1.52.43] - 2026-07-08
+
+### Fixed
+- **Disabling a Startup-folder program from the Startup Manager now actually stops it from launching.** For items that live in the Windows Startup *folder* (as opposed to the registry Run keys), SysManager identified the item by its name without the file extension, but Windows tracks the enabled/disabled state under the item's full filename (for example `Spotify.lnk`). Because of that mismatch, a Startup-folder item that was already disabled showed as enabled, and turning one off wrote the "disabled" flag under a name Windows ignores — so the program kept starting. SysManager now uses the full filename for these items, so their on/off state reads correctly and disabling one takes effect. (Registry Run entries and scheduled-task entries were unaffected.)
+
+## [1.52.42] - 2026-07-08
+
+### Fixed
+- **On non-English Windows, the processor "minimum state" could be saved as 0% and later restored as 0%.** Before applying a performance tweak, SysManager takes a safety snapshot that records your current processor *minimum state* (read from Windows' `powercfg`). On English Windows it read the right value, but on a translated Windows the label it searched for was in another language, so it fell back to the first number in `powercfg`'s output — which is the fixed "minimum possible" value (0%), not your actual setting. That wrong 0% went into the snapshot, so a later "Restore All" wrote 0% back as if it were your original minimum. It now reads the correct value in any display language (the real setting is always the second-to-last value `powercfg` prints), so snapshots and restores are accurate on every Windows locale.
+
+## [1.52.41] - 2026-07-08
+
+### Fixed
+- **Four background operations no longer risk an unhandled error when Windows denies file or system access.** Saving and loading the activity log, enriching the drive list with disk media/bus details, downloading an update, and caching an app icon each already handled ordinary I/O errors but not an "access denied" (UnauthorizedAccess) error from a locked-down or permission-restricted system — which could surface as an unhandled exception (and, for the activity log, on the UI thread). Each now treats access-denied like the I/O errors it already handled: the activity log and icon cache degrade quietly, the drive list is still returned (just without the extra media/bus detail rather than coming back empty), and a denied update download reports failure cleanly so the About tab falls back to opening the download in your browser.
+
+## [1.52.40] - 2026-07-08
+
+### Fixed
+- **Shredding a folder that is a junction or symlink no longer destroys data outside it.** If the folder you picked for "Shred Folder" was itself a junction or symbolic link (for example, one that points at another drive or folder), the shredder followed it and securely erased the files at the *link's target* — data outside the folder you actually selected. It now refuses to shred a folder that is a junction/symlink and asks you to pick the real target folder instead; the existing protection that skips links found *inside* the folder is unchanged.
+- **A folder shred no longer reports failure after it has actually finished.** Removing the emptied folder structure at the end of a shred handled only one kind of error; if a leftover read-only or locked entry denied that final cleanup, the whole operation reported failure even though every file had already been securely overwritten. That cleanup denial is now logged and the shred is reported as completed.
+
+## [1.52.39] - 2026-07-07
+
+### Fixed
+- **Context-menu entry names capitalize correctly on Turkish Windows.** The first letter of a cleaned-up context-menu entry name was upper-cased using the current culture, so on a Turkish (tr-TR) system a leading "i" became "İ" (dotted capital I) rather than "I", subtly corrupting names. It now upper-cases invariantly, since these are program and shell-verb identifiers rather than locale-sensitive prose.
+- **The resource-history file is now rewritten atomically.** When trimming samples past the retention window, the usage-history file was rewritten in place with a single full-file write; a crash or power loss mid-write could leave it truncated or corrupt. It is now written to a temporary file and swapped in atomically, so an interrupted prune can never damage the existing history.
+- **The Standby List Cleaner's background auto-refresh can no longer crash the app.** Its two-second timer tick ran without a top-level guard, so an unexpected fault while reading memory status or auto-purging would surface as an unhandled background exception and take the whole app down. The tick now catches and logs any such fault, matching the guard the tray-icon timer already uses.
+
+## [1.52.38] - 2026-07-07
+
+### Fixed
+- **The Dashboard's "Update All Apps" quick action now uses the app's shared, reliable updater.** The one-click "Update All Apps" button on the Dashboard ran its own hand-written winget command that had drifted from the one the App Updates tab uses — it was missing the flags that suppress winget's interactive prompts and its garbled progress animation and that include packages whose installed version winget can't read, and it always reported "All apps updated" even when the update actually failed. It now calls the same shared updater the App Updates tab uses, so a one-click update behaves identically to the full tab and reports the real outcome.
+
+## [1.52.37] - 2026-07-04
+
+### Fixed
+- **The "Run as administrator" button is now legible on the Light themes.** Its golden-amber styling used fixed dark-theme colors (pale yellow text), so on a light preset the label washed out against the near-white button. It now uses the same theme-aware warning colors as the rest of the app, which switch to a dark amber on light themes — matching the elevation banners that were already fixed.
+
+## [1.52.36] - 2026-07-04
+
+### Fixed
+- **Copying a command from the CLI Interface tab no longer risks an unhandled error if the clipboard is briefly unavailable.** The copy handler only caught one specific clipboard failure type; a different (but related) clipboard error would have gone unhandled. It now catches the documented base error type — matching every other copy-to-clipboard action in the app — so a locked or unavailable clipboard always shows the friendly "try again" message instead.
+
+## [1.52.35] - 2026-07-04
+
+### Fixed
+- **Installing Windows updates no longer aborts the whole batch when one update fails to download.** In the install loop, a failed download released its update collection early and then `continue`d — but the loop's cleanup block always releases that same collection too, so it was released twice. The second release threw an error that stopped the entire install run on the first failed download. The redundant early release is removed; the collection is now released exactly once by the cleanup block, so the batch continues to the next update.
+
+## [1.52.34] - 2026-07-04
+
+### Fixed
+- **A blank or malformed update checksum file no longer crashes the update check.** When verifying a downloaded update, SysManager reads the release's `.sha256` file; if that file came back empty or whitespace-only, parsing it threw an unhandled error instead of simply reporting the checksum as unverified. It now degrades cleanly to a verification failure (the update is treated as unverified rather than crashing), matching how a missing checksum file is already handled.
+
+## [1.52.33] - 2026-07-04
+
+### Fixed
+- **Long names in the Boot Analyzer and Shortcut Cleaner tables now truncate with an ellipsis.** Their free-text columns clipped long values hard at the column edge with no "…", unlike the other data tables in the app. Both now trim consistently. Also aligned the Work-in-Progress placeholder title to the app's shared "Display" heading style instead of a one-off inline font, so all headings stay uniform.
+
+## [1.52.32] - 2026-07-04
+
+### Fixed
+- **System Logs severity cards and the "missing folder" tag stay legible on the Light themes.** The System Logs Critical/Errors/Warnings/Info cards used hardcoded translucent backgrounds, slate-gray labels and a fixed white card border; the Environment Variables "missing folder" tag used a fixed light-red. These now use the app's theme-aware brushes, so they render correctly on every theme. (The Critical card keeps its distinct brighter-red hue so it stays visually separable from Error, and the glow effects are unchanged.)
+
+## [1.52.31] - 2026-07-04
+
+### Fixed
+- **Screen readers now announce a clear label for the action buttons on System Health, Network Repair and Windows Features.** Several buttons (Scan, Check memory errors, Run SMART check, chkdsk scan/cancel, Flush DNS, Reset Winsock, Reset TCP/IP, Run as administrator) had no accessibility name, so assistive tech only had the raw content to read. They now carry a descriptive `AutomationProperties.Name`, matching the pattern already used elsewhere in those views.
+
+## [1.52.30] - 2026-07-04
+
+### Fixed
+- **Refreshing the Privacy & Telemetry tab no longer briefly freezes the window.** The "Refresh" button read every privacy registry key synchronously on the UI thread, so the app hitched while the toggles reloaded. The refresh now reads the registry on a background thread (matching how the tab loads initially) and updates the UI when done, keeping the window responsive.
+
+## [1.52.29] - 2026-07-04
+
+### Fixed
+- **Toggle switches and safety filter chips now follow the theme on the Light presets.** The "off" state of every toggle switch (Privacy toggles, feature switches, etc.) used a hardcoded dark-slate track that looked nearly black on the light themes; the safety filter chips (Safe / Caution / Critical) used hardcoded translucent status colors. Both now use the app's theme-aware brushes, so the off-toggle reads as a soft muted track and the chips stay legible on every theme. On the dark themes the look is unchanged.
+
+## [1.52.28] - 2026-07-04
+
+### Fixed
+- **Ping target cards and Context Menu preview tooltips are now theme-aware on the Light themes.** The per-target cards on the Ping tab used a hardcoded translucent-white border and fixed slate-gray metric labels (LATENCY/AVG/JITTER/LOSS) that were nearly invisible on the light presets; the Context Menu style-preview tooltips used fixed `Gray`/`DimGray` text. Both now use the app's theme text and border brushes, so they stay legible on every theme. On the dark themes the look is unchanged.
+
+## [1.52.27] - 2026-07-04
+
+### Fixed
+- **Dashboard "Run as admin" pill now follows the theme.** When SysManager isn't elevated, the small amber "Run as admin for all sensors" pill on the Dashboard used hardcoded amber tints that didn't adapt to the theme (and were tuned for dark). It now uses the app's theme-aware warning colors, so it stays legible on the light presets too.
+
+### Changed
+- **Dashboard metric colors are now named theme brushes.** The MEMORY (blue) and GPU (purple) accent colors were copy-pasted hex values repeated across the metric cards and quick-action list. They're now defined once as named `MetricBlue`/`MetricPurple` brushes and referenced everywhere — no visual change, just a single source of truth (matching how the CPU card already used a named brush).
+
+## [1.52.26] - 2026-07-04
+
+### Fixed
+- **Long task names and paths on the Task Scheduler tab now truncate with an ellipsis.** The Task and Path columns rendered long text clipped hard at the column edge with no "…" indicator, unlike the other data tables in the app (Services, Drivers, Uninstaller, etc.) which trim cleanly. Both columns now use the same character-ellipsis trimming, so overflowing text ends in "…" and the layout stays tidy.
+
+## [1.52.25] - 2026-07-04
+
+### Fixed
+- **Status badges (Startup, Windows Features, Uninstaller, Process Manager) are now readable on the Light themes.** The colored status pills — "Enabled"/"Disabled" on Startup Manager, "Done"/"Failed"/"Reboot required" on Windows Features, the "winget"/"Local" source tag and status on Uninstaller, and the process-state pill — used hardcoded colors tuned for the dark themes (pale green/amber text, translucent-white borders). On the six light presets they washed out to near-invisible (green-on-green text, no visible border). They now use the app's theme-aware status colors, so they stay legible on every theme. The "Irreversible" badge on Deep Cleanup was migrated the same way. On the dark themes the look is unchanged.
+
+## [1.52.24] - 2026-07-04
+
+### Fixed
+- **Dropdowns (combo boxes) now match the theme and stay readable on the Light themes.** The folder/path pickers on Duplicate Finder and Disk Analyzer, and other dropdowns across the app, used the default Windows combo-box look — a fixed white popup with near-black text that ignored the selected theme. On the dark themes it clashed; on the light themes the editable text and dropdown items were low-contrast. Combo boxes now use a theme-aware style (matching the app's text fields — themed surface, border, rounded corners, accent focus, and a properly styled dropdown list), so they look consistent and stay legible on every theme.
+
+## [1.52.23] - 2026-07-03
+
+### Fixed
+- **Warning, success and info banners are now readable on the Light themes.** Semantic status text (the amber "a finer timer wakes the CPU…" note on Timer Resolution, the "Running as administrator" banners, and similar warning/success/info messages across the app) used pale colors tuned for the dark themes. On the six light presets those washed out to near-invisible against the light banner — the amber warning text measured only ~1.4:1 contrast (WCAG AA needs 4.5:1). The theme engine now recomputes all status colors per theme, using darker, saturated tones on the light presets, so every banner stays legible on every theme. On the dark themes nothing changes.
+
+## [1.52.22] - 2026-07-03
+
+### Fixed
+- **Outline buttons are now visible on the light themes.** "Ghost" buttons (e.g. Export text / Copy on the System Report tab, and similar secondary actions elsewhere) drew their border in a translucent white that was invisible against the light presets' pale backgrounds — the buttons looked borderless. They now use the theme's own border color, so they're clearly outlined on every theme.
+- **Startup Manager asks before re-enabling everything.** The "Enable All" button immediately re-enabled every disabled startup item — a bulk system change that adds boot time — with no confirmation. It now asks first (showing how many items will be affected), matching the confirm-before-bulk-change behavior used elsewhere in the app.
+
+## [1.52.21] - 2026-07-03
+
+### Fixed
+- **Editing the hosts file no longer erases your own comments.** When you added, removed, or toggled an entry on the DNS & Hosts tab, SysManager rewrote the file from just the address mappings — silently dropping any standalone comment lines or blank spacing you'd written (section notes, documentation). Those comment and blank lines are now preserved through an edit, kept above the entries. Repeated saves stay stable (no duplicated headers), and a file with no comments is written exactly as before.
+
+## [1.52.20] - 2026-07-03
+
+### Fixed
+- **The theme picker now opens on your saved theme's presets.** If you'd set a Light or Custom theme, the theme popup initially built its preset list from the default Dark mode and only corrected itself once you clicked something — so it briefly showed the wrong set of presets. It now reads your saved mode first, so the correct presets appear immediately.
+- **Ping and System Logs numbers are now readable on the Light themes.** The average-ping / jitter / latency figures on the Network Ping tab and the severity counts (Critical, Errors, Warnings, Info) on the System Logs tab used fixed pale colors that nearly disappeared against the light preset backgrounds. They now use the app's semantic status colors, so they stay legible on every theme.
+
+## [1.52.19] - 2026-07-03
+
+### Fixed
+- **Recycle Bin size estimates now match what emptying actually frees.** Both Quick Cleanup and Deep Cleanup summed the whole hidden `$Recycle.Bin` folder on every drive — which, on a shared PC (especially when running as administrator), also counts *other users'* deleted files. But emptying the bin only ever clears the current user's items, so the "X MB in Recycle Bin" figure could be far larger than what actually gets freed. The estimate now measures only the current user's Recycle Bin, so the number is honest.
+- **Installed-app detection no longer mislabels similarly-named apps.** In the Bulk Installer, an app was marked "Installed" if its winget Id appeared anywhere in a `winget list` row — so an app whose Id is a prefix of another (e.g. `Microsoft.Teams` vs. an installed `Microsoft.Teams.Classic`) was wrongly shown as already installed. Detection now compares exact winget Ids.
+- **System Report and About page now show the correct VRAM for GPUs over 4 GB.** Video memory was read from a 32-bit WMI field that caps at ~4 GiB, so an 8 GB or 12 GB card was reported as ~4 GB. The true size is now read from the graphics driver's 64-bit registry value, falling back to the old field only when that isn't available.
+
+## [1.52.18] - 2026-07-03
+
+### Fixed
+- **A broken WMI service no longer throws an error dialog when reading system info.** The OS, CPU, and memory queries weren't guarded, so on a machine with a damaged or stopped WMI service the Dashboard/System Report could surface a raw error. Each query now degrades to safe defaults (matching how the disk query already behaved), so the app keeps working with whatever information is available instead of failing.
+
+## [1.52.17] - 2026-07-03
+
+### Fixed
+- **System Logs no longer come back empty on some non-English regional settings.** The Event Log query built its time filter with the OS's regional time separator, so on a region that uses `.` instead of `:` in times (e.g. Finnish) the timestamp became invalid and the query silently failed — the Logs tab showed nothing. The timestamp is now always formatted in the culture-independent ISO form, so log filtering works regardless of regional settings.
+
+## [1.52.16] - 2026-07-03
+
+### Fixed
+- **Cancelling a Deep Cleanup scan or clean now reports "cancelled", not "complete".** A scan or clean stopped partway through cancellation still reported success (and fired a "complete" notification) with partial results. Cancelling now correctly ends the operation as cancelled.
+- **Driver list can't be started twice at once.** The "List drivers" button had no busy-guard (unlike the other scan tabs), so a second click during a scan could corrupt the collected output. It's now disabled while a scan is running, matching the App Updates / Uninstaller tabs.
+- **Hardened Performance-tab power queries against a threading race.** The four `powercfg` reads collected output into a plain list from a callback that fires on two reader threads at once, which could corrupt the captured lines. They now use a thread-safe queue, matching the winget service.
+
+## [1.52.15] - 2026-07-03
+
+### Fixed
+- **One invalid entry no longer aborts a whole batch upgrade or uninstall.** In App Updates and the Uninstaller, if a single package had an Id that failed validation (e.g. an Add/Remove-Programs GUID), the error thrown before that item even started would abort the entire remaining batch. Each item's error is now recorded on its own row and the batch continues with the rest.
+- **Single-instance activation is more robust.** The background listener that focuses the existing window when you launch a second copy wrapped its whole loop in one try/catch, so a single unexpected error could stop it permanently for the rest of the session. Each iteration now handles its own errors and keeps listening.
+
+## [1.52.14] - 2026-07-03
+
+### Security
+- **File Shredder now overwrites through a single locked handle, closing a path-swap race.** The shredder validated the target path, then reopened the file by name for each overwrite pass and the final truncate. Between the validation and those reopens, a reparse point (junction/symlink) swapped in at the path could have redirected the overwrite to a different file — a time-of-check/time-of-use race. The shredder now opens the file once with an exclusive (no-sharing) handle, re-verifies *that handle's* real resolved path against the protected-folder denylist before writing anything, and reuses the same handle for every pass and the truncate — so nothing can redirect the operation once it starts. The existing symlink/junction protections are unchanged.
+
+## [1.52.13] - 2026-07-03
+
+### Fixed
+- **App Updates now shows upgrades on Windows display languages we don't have column titles for.** The winget table parser identifies the "Available" and "Source" columns by matching their header word against a list of known translations. On a language not in that list (e.g. Russian, Korean), those two columns weren't found, so every upgrade row came back with a blank "Available" version and was silently dropped — App Updates showed **no upgrades at all**. For the standard five-column upgrade table the parser now falls back to the fixed column order when a title isn't recognized, so upgrades appear regardless of display language. Four-column tables stay ambiguous by design and are left untouched (they can't be disambiguated by position).
+
+## [1.52.12] - 2026-07-03
+
+### Fixed
+- **Turning a privacy toggle off now removes the setting instead of forcing the opposite.** When you switched a privacy protection back off (or used Undo in the Tweaks hub), SysManager wrote the "off" value into the registry — for the policy-backed toggles this **created an enforced Group Policy the machine may never have had**. The worst case was "Disable diagnostic data": reverting it wrote `AllowTelemetry = 3`, which is *enforced Full telemetry* — strictly worse than the value simply being absent. Reverting a toggle now **deletes** our registry value so Windows falls back to its own default, which is the correct meaning of "undo". This applies to both the Privacy & Telemetry tab and the Tweaks hub's Undo.
+
+## [1.52.11] - 2026-07-03
+
+### Fixed
+- **Performance tab now reverts correctly on non-English Windows.** Two power settings were read by matching English text that Windows translates in other display languages, so on a non-English system the "Restore" path misbehaved:
+  - The **active power plan** was located by the English "GUID:" label. On a localized Windows that label is translated, so the plan couldn't be read and Restore silently skipped restoring it. The plan is now identified by its GUID (identical in every language), so it restores correctly regardless of display language.
+  - The **processor minimum state** was read by an English label and fell back to a fabricated 5% when the label didn't match — which then got **written back** as the "restored" value on non-English machines. It now returns "unknown" when it genuinely can't be read, and Restore leaves the setting untouched rather than forcing a wrong value. The English fast-path is unchanged.
+
+## [1.52.10] - 2026-07-03
+
+### Fixed
+- **Browser Cleaner now actually cleans Opera.** Opera was listed as a supported browser but its cleanup silently did nothing: the paths were built for the Chromium `\Default\` profile layout that Chrome/Edge/Brave use, while Opera Stable stores its profile directly under `Opera Software\Opera Stable` (no `\Default\`) and keeps cookies/history/sessions under Roaming AppData rather than Local. Every Opera path missed, so scan found nothing and clean freed nothing. Opera now uses its real on-disk layout; Chrome, Edge, Brave, and Firefox are unchanged.
+
+## [1.52.9] - 2026-07-03
+
+### Fixed
+- **Disk Analyzer no longer crashes when "Top files" is set to 0.** The large-file scanner takes a "keep the top N" count from the Deep Cleanup input. If that value was 0 (or negative), the scan threw an internal error the moment it found its first file and the operation faulted. The scanner now treats a non-positive count as "nothing to keep" and returns an empty result instead of crashing.
+
+## [1.52.8] - 2026-07-01
+
+### Fixed
+- **App Updates, Uninstaller, and Bulk Installer now work on non-English Windows.** These tabs read winget's table output by matching the English column headers ("Name / Id / Version / Available / Source"). On a localized Windows, winget translates those titles (e.g. German "Name / Kennung / Version / Verfügbar / Quelle"), so the match failed and every list came back **empty** — App Updates showed no updates, the Uninstaller showed no apps, and Bulk Installer search returned nothing. The parser now locates the table via the dashes separator row that winget prints in every language and maps the columns by position instead of by the English words, so it works regardless of the Windows display language. The English fast-path is unchanged.
+
+## [1.52.7] - 2026-07-01
+
+### Fixed
+- **Chart text is now readable on the light themes.** The Ping/Traceroute latency chart and the Resource History usage/temperature charts painted their axis labels, legend, and tooltip in a fixed near-white color that was set once and never updated when you switched themes. On any of the six light presets that meant white-on-white — the axis values, time labels, and legend were effectively invisible. The chart text now follows the active theme (dark-on-light on light presets, light-on-dark on dark presets) and repaints instantly when you change the theme. The previously-unused theme-change signal is now wired up to drive this.
+- **Update banner and toast notification follow the theme.** Both used a fixed dark background, so on a light preset the update banner was a dark box clashing with the light UI and the toast's title could render dark-on-dark. They now use the theme's elevated surface color and stay legible on every preset.
+
+## [1.52.6] - 2026-07-01
+
+### Fixed
+- **`--json` now stays machine-readable on CLI errors.** When an unknown flag or a bare usage error was hit together with `--json`, the CLI printed the human help text instead of JSON — so piping the output to a JSON parser (`SysManager.exe --bogus --json | ConvertFrom-Json`) broke. Both error paths now emit valid JSON: an unknown flag returns `{"error": "..."}` and a bare usage error returns the machine-readable command catalog.
+- **Headless CLI reports a runtime fault as an error (exit 1), not a usage error (exit 2).** If a CLI command threw unexpectedly the process exited with code 2, which conventionally means "you typed the command wrong." An unexpected fault is now logged and exits with code 1 (general error), so scripts can distinguish a bad invocation from a genuine failure.
+- **Startup crashes are now logged instead of vanishing.** The unhandled-exception handlers were registered *after* the dependency container, tray icon, and resource-history sampler were built — so a failure during that early startup surfaced as a bare Windows crash with no log entry. The handlers are now wired first, so any startup fault is captured in the log.
+- **Resource-history retention config load no longer risks an unhandled exception at startup.** Reading the retention setting caught malformed JSON and I/O errors but not an access-denied error; since it runs during construction, that gap could throw in the unprotected startup window. It now degrades to the 7-day default on access-denied too.
+
+## [1.52.5] - 2026-07-01
+
+### Fixed
+- **Dashboard vitals polling no longer re-scans the RAM hardware inventory every 300 ms.** The live CPU/RAM/GPU snapshot the Dashboard refreshes ~3× a second was re-enumerating the physical memory modules (bank, manufacturer, capacity, speed, part number) via WMI on every tick, even though that inventory is fixed hardware that never changes while the app runs. The DIMM list is now read once and cached — matching how OS, CPU, and disk info were already cached — so only the dynamic RAM totals are refreshed per poll. Lower background CPU/WMI overhead with no change to what's displayed.
+
+## [1.52.4] - 2026-07-01
+
+### Fixed
+- **In-app updater no longer aborts every update as "possible tampering."** The Authenticode check treated an *unsigned* download as an invalid signature and cancelled the install — but SysManager ships unsigned builds, so the About-tab "Download → Install" flow was blocked for every release. (Most people update through winget, so this went unnoticed.) An unsigned binary is now correctly accepted; file integrity is still enforced by the SHA256 verification that runs first, and the check now only rejects a file whose signature data is genuinely unreadable.
+
+## [1.52.3] - 2026-07-01
+
+### Fixed
+- **Performance tab "Restore" no longer mis-reverts Xbox Game Bar.** Restore captured the Game Bar overlay (`AppCaptureEnabled`) and per-game DVR (`GameDVR_Enabled`) as two independent settings but then wrote a single combined value to both keys — so if you had one on and the other off, restoring forced both off and silently lost the on state. Each setting is now restored to exactly what the snapshot captured.
+
+## [1.52.2] - 2026-07-01
+
+### Fixed
+- **App-update count on the Dashboard is now accurate.** The dashboard alert used a fragile "count non-blank winget lines minus two" heuristic that mis-counted whenever winget's header/footer layout shifted. It now reuses the same parsed upgrade list the App Updates tab shows (rows that actually have an available version), so the two surfaces always agree.
+- **Bulk Installer search results parse reliably for wide or non-Latin app names.** The search parser previously used fixed character offsets that mis-sliced rows containing wide/CJK characters. It now routes through the shared winget table parser (the same one the upgrade list uses), so column detection is handled in one place.
+
+## [1.52.1] - 2026-06-30
+
+### Added
+- **Safety note in the About tab.** The legal section now explicitly states that some tools change system settings, the registry, or delete files — use them at your own risk, review each action before confirming, and back up important data first — alongside the existing reminder that SysManager creates a System Restore point where it can and keeps changes reversible.
+
+## [1.52.0] - 2026-06-30
+
+### Changed
+- **App icons in the Bulk Installer are now opt-in.** SysManager no longer contacts the web for app icons by default — this keeps the "no cloud, no telemetry" promise intact out of the box. A new "Load app icons from the web" checkbox in the Bulk Installer toolbar turns the feature on; only then are icons fetched from Google's favicon service (the choice is remembered). Already-cached icons still load offline. The README now documents exactly when the app uses the network.
+
+## [1.51.14] - 2026-06-30
+
+### Security
+- **Input validators that feed a command/registry boundary now reject a trailing newline.** Nine allowlist patterns (winget package IDs, service names, blocked-executable names, Appx package names, environment-variable names, Windows-feature names, event-log provider names, and hostnames) used `^…$` anchors, which in .NET match before a trailing newline — so a value like `pkg\n` slipped through and could smuggle a second line into the command. They now use absolute `\A…\z` anchors. The winget package-ID pattern additionally dropped `\s` (which allowed tabs/newlines mid-string) in favour of a literal space.
+- Added injection-rejection negative tests for the winget package-ID validators (`UpgradeAsync`, `UninstallAsync`) and the service-name/start-type validator (`SetStartupTypeAsync`), covering command separators, chaining, substitution, quotes, newlines, and over-length input.
+
+## [1.51.13] - 2026-06-30
+
+### Security
+- **Settings Watchdog restore is now allowlisted to its own catalog.** The restore path verified the hive but not the full setting; it now only ever writes a setting present in the watchdog's curated catalog (matched by exact path and value name), so it can never be repurposed to write an arbitrary registry key.
+- **Defender exclusion paths are validated at the service boundary.** Adding a scan exclusion now rejects empty, non-rooted, and wildcard (`*`/`?`) paths at the service itself (not just the UI), so an over-broad exclusion can't weaken Defender via any caller.
+- **The downloaded Ookla speed-test CLI now has its full certificate chain validated.** Verification previously checked only that the Authenticode subject contained "Ookla"; it now also builds and validates the certificate chain to a trusted root with online revocation, failing closed (and deleting the binary) if the chain is not valid.
+- **Event-log provider filtering uses an allowlist instead of character stripping.** A provider name with unexpected characters is now rejected outright rather than silently stripped (which could mangle a legitimate name into a different, wrong filter); injection remains blocked.
+- **The single-instance named pipe is restricted to the current user.** The activation pipe is now created with an explicit ACL granting only the current user connect rights, instead of relying on the default permissions.
+
+## [1.51.12] - 2026-06-30
+
+### Fixed
+- **File shredder no longer follows symlinked files out of the selected folder.** When shredding a folder, the file walk skipped reparse-point directories but still included reparse-point files, so a symlink/hardlink file could cause its link target — possibly outside the folder — to be overwritten. Symlinked files are now skipped, matching the existing directory behaviour.
+- **Restoring the hosts file backup preserves the file's security descriptor.** Restore used a plain overwrite-copy, which relinks a new file that inherits only the folder's default permissions; it now replaces the file in place (like Save does), keeping the hardened hosts-file ACL.
+- **Hostname validation for new hosts entries is stricter.** The validator accepted malformed names such as consecutive dots (`a..b`), a leading/trailing dot, and over-long labels. It now enforces proper DNS label rules (1–63 chars per label, no consecutive or edge dots).
+
+## [1.51.11] - 2026-06-30
+
+### Fixed
+- **A native string buffer was leaked on every Known-Folder lookup.** The Downloads/Documents/Desktop/Pictures/Music/Videos path resolver marshalled the Win32 result as a managed string but never freed the underlying COM-allocated buffer; it now takes the raw pointer and frees it, so repeated lookups (cleanup scans, etc.) no longer leak memory.
+- **Two power-plan changes could corrupt a concurrent power-query's output.** The power-plan/processor-state/hibernation writers shared the same process runner as the readers that parse `powercfg` output, but ran without the reader's serialization gate; a write running during a read could interleave the output stream. The writers now take the same gate.
+- **Listing installed apps could drop or corrupt a line under a thread race.** The winget-list output collector used a plain list that both the stdout and stderr reader threads wrote to concurrently; it now uses a thread-safe queue, matching the upgrade-list path.
+
+## [1.51.10] - 2026-06-30
+
+### Fixed
+- **Cancelling an update download no longer deletes a previously-downloaded copy.** If a fresh download was cancelled, the cleanup step also removed any already-cached, still-valid installer, forcing an avoidable re-download on the next launch. Cancellation now only removes the partial in-progress file.
+- **A safe-to-disable service description is no longer silently dropped.** The service safety database held two entries for Windows Audio that differed only in capitalisation; in the case-insensitive lookup the second silently overwrote the first, losing the "only disable on headless servers" guidance. The duplicate was removed so the fuller description is always shown.
+- **The default-gateway detection prefers the real physical route.** Ping/monitoring picked the first active adapter's gateway, which on a machine with a VPN or virtual adapter could be the wrong one. Tunnel adapters are now skipped and physical adapters (Ethernet/Wi-Fi, fastest first) are preferred.
+
+### Changed
+- Removed an unreachable `catch` in the Recycle Bin helper: `SHEmptyRecycleBin` reports failure through its return code, not an exception, so the failure path now reads and logs the HRESULT directly.
+
+## [1.51.9] - 2026-06-30
+
+### Fixed
+- **A failed uninstaller launch no longer aborts the whole batch.** When uninstalling several apps at once, one app whose uninstaller executable could not be launched (missing, blocked, or corrupt) threw an error that stopped the entire run and surfaced a raw error dialog. The failure is now recorded on that app's row and the batch continues with the remaining apps.
+- **Defender toggles report failures cleanly instead of crashing to an error dialog.** Enabling/disabling PUA protection or Controlled Folder Access, and adding/removing scan exclusions, now catch a PowerShell runspace-level fault and show it as a status message — matching how the status refresh already behaved.
+- **System Restore actions report failures cleanly.** Creating or starting a restore now catches a runspace/WMI-level fault and shows it as a status message instead of letting it surface as a global error dialog.
+
+## [1.51.8] - 2026-06-30
+
+### Fixed
+- **Work-in-progress tabs no longer show a doubled hash in their issue reference.** The placeholder tabs (Bandwidth Monitor, Gaming Profile, Edge/OneDrive Remover, Notification Blocker, Volume Control) rendered "Tracked in issue ##337" because the template prepended a `#` to a value that already started with one. The duplicate is removed, so they now read "Tracked in issue #337".
+- **A drive with no SMART data is no longer painted red as if it were failing.** The disk-health percentage swatch fell through to the "failing" red when SMART health data was unavailable; it now shows the neutral grey used elsewhere for unknown readings, matching the temperature swatch.
+- **The App Alerts busy indicator no longer switches off while monitoring is active.** Running a manual "refresh installed apps" while monitoring was on forced the busy/monitoring affordance off in its cleanup step; the indicator now stays in sync with the monitoring state.
+- **The Context Menu search box now shows its placeholder text.** The "Search entries…" hint was wired through a `Tag` that the default text-box template never renders, so the field appeared blank; it now uses the same in-box placeholder pattern as the Bulk Installer search.
+- **One invalid custom-theme colour no longer discards the other three.** Entering a malformed hex value in the Appearance → Custom editor silently dropped all four colour edits; each field is now parsed independently, valid values still apply, and an invalid field is flagged with red text and a tooltip.
+
+## [1.51.7] - 2026-06-29
+
+### Fixed
+- **Unknown command-line flags now report a usage error instead of silently opening the app.** Running `SysManager.exe --bogus` (or any unrecognized `--flag`) used to fall through to launching the GUI and exit 0, contradicting the documented contract (`--help` states unknown options exit 2). Unrecognized flags are now treated as a headless usage error: they print "Unknown option" with the help text and exit 2, while the internal startup sentinels (the elevation relaunch and the in-process update applier) are explicitly excluded so they still route to their own startup paths. Bare non-flag arguments are still ignored.
+
+## [1.51.6] - 2026-06-29
+
+### Added
+- **Progress indicator while a tab is working.** Resource History, Scheduled Maintenance, and Tweaks Hub now show a small progress bar next to the status line during loads, applies, and schedule changes — so you can tell the app is busy instead of wondering if a click registered.
+
+### Changed
+- **Internal cleanup:** removed eight unused placeholder objects that were allocated on every launch but no longer shown anywhere (left over after those features graduated to real tabs). No user-visible change.
+
+## [1.51.5] - 2026-06-29
+
+### Fixed
+- **Scheduled Maintenance buttons no longer double-fire.** Save / Remove / Refresh are now disabled while one of them is running, so a fast double-click can't start overlapping operations.
+
+### Changed
+- **Scheduled Maintenance task now pins an explicit user principal.** The recurring task is registered to run as the current interactive user at the standard (non-elevated) level via an explicit principal, rather than relying on the scheduler's default — making its "current user, no admin, only when logged on" behavior deliberate.
+
+## [1.51.4] - 2026-06-29
+
+### Fixed
+- **`SysManager.exe --version` now reports the real version.** The command-line interface printed a hardcoded version that had fallen behind the actual build; it now reads the version from the running app, so `--version` and `--help` always match the installed release.
+
+## [1.51.3] - 2026-06-29
+
+### Changed
+- **Resource History is lighter on the system.** The background sampler no longer runs a disk health/SMART query every 10 seconds just to label storage sensors it doesn't record — it now reads only the CPU/GPU temperatures it actually stores, cutting continuous background WMI work over a long session.
+- **Faster history loading.** Opening the tab or changing the range now reads only the samples in the selected window (reading the file from the newest end and stopping at the cutoff) instead of parsing the entire history file every time, which matters once weeks of history have accrued.
+
+### Fixed
+- **Cleaner shutdown for Resource History.** The sampler now stops fully before its file lock is released on exit, avoiding a harmless-but-noisy background error during shutdown.
+- **Temperature chart now shows a clear "no data" message** on machines without supported temperature sensors, instead of a blank chart.
+
+## [1.51.2] - 2026-06-29
+
+### Fixed
+- **Tweaks Hub now reports the restore point honestly.** It previously stated a System Restore point "is created before the first change" as a fact; creating one needs administrator and Windows only allows one per 24h, so it often silently didn't happen. The wording now says it's attempted (when running as administrator) and the status line confirms only when one was actually created — every tweak remains individually reversible regardless.
+- **Fixed a threading issue when applying tweaks.** The first apply of a session updated the on-screen state from a background thread; it now stays on the UI thread, avoiding a potential intermittent error.
+
+## [1.51.1] - 2026-06-29
+
+### Fixed
+- **Settings Watchdog no longer crashes on a malformed baseline file.** A `settings-baseline.json` that was valid JSON but missing its data could throw when checking for changes; it's now treated as "no baseline saved" so the tab stays usable.
+- **Settings Watchdog now shows a "Run as administrator" banner** when not elevated, since restoring machine-wide settings needs admin — previously you only found out after a restore silently failed.
+
+## [1.51.0] - 2026-06-29
+
+### Added
+- **Tweaks Hub tab (Preview).** A single place to review and apply the safe, reversible optimizations that are otherwise spread across tabs. Tweaks are grouped into **Essential** (low-risk, per-user, apply without admin) and **Advanced** (higher-impact, machine-wide, need administrator). Tick the ones you want and **Apply Selected** or **Undo Selected** in bulk — a live counter shows pending changes, an automatic System Restore point is created before the first change, and every tweak is individually reversible. Each row shows whether it's currently Applied or at the Windows Default. It's a front-end over the same reversible operations as the Privacy & Telemetry tab — no tweak is reimplemented. Closes #907.
+
+## [1.50.0] - 2026-06-29
+
+### Added
+- **Scheduled Maintenance tab (Preview).** Automate maintenance on a schedule: register one Windows scheduled task that runs SysManager in the background (via its CLI) to clean temporary files or purge standby memory, daily or weekly at a time you pick. The tab shows the task's last run, next run, and last result, and lets you update or remove the schedule (each confirmed first). It runs in your user context — no admin required — and only ever touches its own task at `\SysManager\Scheduled Maintenance`, never any other scheduled task. Built on the same safe CLI verbs, so nothing destructive is automated. Closes #10.
+
+## [1.49.0] - 2026-06-29
+
+### Added
+- **Command-line interface (Preview).** SysManager now accepts command-line flags so you can automate the safe maintenance actions from scripts, Task Scheduler, or deployment tools — it runs headless (no window) and writes to the launching console. Commands: `--health` (read-only health score), `--cleanup` (temp-file cleanup), `--trim-ram` (purge the standby list), plus `--version`, `--help`, and `--list`; add `--json` for machine-readable output or `--silent` for scripting, with conventional exit codes (0 success · 1 error · 2 usage). Only read-only or non-destructive actions are exposed — anything that changes the system irreversibly stays in the GUI behind a confirmation. A new **CLI Interface** tab lists every command with one-click copy. Closes #342.
+
+## [1.48.0] - 2026-06-29
+
+### Added
+- **Settings Watchdog tab (Preview).** A new Monitor tab that catches the settings Windows Update silently resets — telemetry level, web search in Start, the Widgets board, lock-screen ads, and Start-menu suggestions. Save a baseline of your current preferences with one click; after an update, "Check now" lists anything that drifted in plain language (e.g. "Diagnostic data: was 'Off', now 'Full'") and "Restore changed" writes them back to your baseline in one step. Strictly local: the baseline lives in your `%LocalAppData%\SysManager` folder and only a fixed list of well-known registry values is ever read or written. Closes #335.
+
+## [1.47.0] - 2026-06-29
+
+### Added
+- **Resource History tab (Preview).** A new Monitor tab that records your CPU, RAM and GPU usage plus CPU/GPU temperatures every 10 seconds in the background — including while the app is minimized to the tray — so you can investigate what caused a slowdown hours or days ago instead of only seeing the live moment. Pick a range (last hour through 30 days) to scroll a usage chart and a temperature chart, keep 7/14/30 days of history, and export the visible range to CSV. Strictly local: history lives in your `%LocalAppData%\SysManager` folder and nothing leaves the machine. Closes #13.
+
+## [1.46.0] - 2026-06-29
+
+### Changed
+- **Clearer App Updates status.** When updating apps, each row now shows a plain-English result instead of a raw exit code — e.g. "Updated", "No applicable update found", "Update installed — restart required", or "App is running — close it and retry" — and unknown failures show a tidy hex code rather than a giant negative number. The summary line now reports successes and failures honestly ("Updated 3 of 4 · 1 failed") instead of counting every attempt as done. winget's progress bar is also suppressed (`--no-progress`), so the live output no longer fills with garbled block characters. Closes #1130.
+
+## [1.45.3] - 2026-06-29
+
+### Fixed
+- **Dashboard "Recent activity" now reflects what you actually do.** Previously it only recorded a handful of Dashboard quick-action buttons, so it stayed empty for normal use. It now records the features you open and the operations you complete across the app (temp cleanup, DNS changes, app removals, restore points, standby purge, …), newest first. Closes #1132.
+
+## [1.45.2] - 2026-06-29
+
+### Fixed
+- **Docs now match the app after the eight features left Preview.** The README still showed those eight tabs with a "Preview" marker and ARCHITECTURE still tagged them "Preview" even though they had graduated — both are now corrected so the documentation reflects the shipped state.
+- **Update log no longer records the full user folder path** in three places (an invalid-signature warning and two cleanup messages); they now use the same path-scrubbing the rest of the updater already applied, so a shared log can't reveal the account name.
+
+## [1.45.1] - 2026-06-29
+
+### Fixed
+- **CPU Core Affinity now scrolls when there are many cores.** On a machine with a high logical-processor count (or a short window), the core tiles overflowed the card and the lower ones were cut off with no way to reach them. The core grid now scrolls, with the header and select buttons pinned, so every core is reachable regardless of core count or window size.
+
+## [1.45.0] - 2026-06-29
+
+### Changed
+- **Consistent "empty list" messages across every tab.** Lists and tables that can start empty — App Updates, App Blocker, App Alerts, Shortcut Cleaner, File Shredder, Duplicate Finder, Context Menu, Task Scheduler, Display Profiles, Boot Analyzer, Defender exclusions and the live output console — now show the same centred placeholder (an icon, a short title and a one-line hint on how to populate the list) instead of a blank area or nothing at all. The handful of tabs that already had a placeholder (Debloater, Restore Points, Camera/Mic/Location, Browser Cleaner, System Logs, System Report) were moved onto the same shared component so the look can't drift between tabs again. A 📂 emoji in the Disk Analyzer and a shield emoji in Process Manager were also swapped for the proper icon font. Purely visual — no behaviour changes.
+
+## [1.44.1] - 2026-06-28
+
+### Changed
+- **More consistent look across tabs.** A pass over the whole UI brought the remaining tabs in line with the app's design system: every tab that does background work now shows the same slim progress indicator next to its status line; status text, section labels and large readouts use the shared text styles instead of one-off sizes; a few hardcoded colours and an emoji icon were swapped for the shared theme colours and the proper icon font; and a redundant font override was removed. Purely visual consistency — no behaviour changes.
+
+## [1.44.0] - 2026-06-28
+
+### Changed
+- **Eight tabs graduated out of Preview.** Task Scheduler, Standby List Cleaner, Timer Resolution, CPU Core Affinity, Display Profiles, File Lock Detector, Defender Tweaks and Dark Mode Scheduler no longer carry the "Preview feature" banner or the PREVIEW tag in the sidebar. They've been verified end to end — functionality, error handling, safety guards, automated tests for the command paths, and a live check that each one's real effect on the system works and reverts cleanly. (The four correctness fixes from 1.43.1 — the Task Scheduler wildcard match, the Standby purge running off the UI thread, the Display Profiles revert check, and the Defender verification — were part of this hardening.)
+
+## [1.43.1] - 2026-06-27
+
+### Fixed
+- **Task Scheduler enable/disable now always acts on exactly the task you picked.** Windows task names can contain characters like `* ? [ ]`; the enable/disable used these verbatim against a wildcard-matching command, so a task whose name contained them could have toggled *more than one* task (or silently none) while still reporting success. Names and paths are now matched literally, and the operation reports success only when exactly the selected task changed.
+- **The Standby List Cleaner no longer freezes the window while purging.** The memory purge ran on the UI thread; on a large cache that briefly locked up the app. It now runs in the background, both for the manual button and the automatic threshold purge (which also no longer stacks if a purge is still running).
+- **Display Profiles tells you if it couldn't undo a change.** If the 15-second auto-revert failed to restore your previous resolution/refresh rate (e.g. the driver rejected it), the app used to claim it had reverted. It now detects the failure and tells you how to recover via Windows display settings.
+- **Defender Tweaks no longer reports a change that didn't happen.** Turning a protection off or removing an exclusion could show "updated" even when the change silently failed (e.g. without administrator rights), because the verification matched the unavailable/empty fallback state. It now confirms Defender status was actually readable before reporting success.
+
+## [1.43.0] - 2026-06-27
+
+### Added
+- **Six more tabs now tell you when they need administrator rights.** Process Manager, Startup Manager, Task Scheduler, Defender Tweaks, File Lock Detector and Shortcut Cleaner all perform actions that require elevation (ending system processes, toggling startup entries and scheduled tasks, changing Defender settings, unlocking protected files, removing shortcuts in shared locations) — but unlike the rest of the app they gave no upfront hint. Each now shows the same banner the other tabs use: a "Run as administrator" prompt when you're not elevated, and a confirmation strip when you are. Consistent with Services, DNS & Hosts, Uninstaller, and the others.
+
+## [1.42.12] - 2026-06-27
+
+### Fixed
+- **The Dashboard is lighter on the system while it's open.** Two background readings were doing far more work than needed on their refresh timers: the GPU widget re-initialised the graphics API (and re-queried the adapter on non-NVIDIA machines) several times a second, and — when running as administrator — the temperature panel opened and closed its hardware-monitoring driver on every two-second poll. Both now initialise once and reuse that handle, so the live Dashboard uses noticeably less CPU and fewer system handles without changing what you see.
+- **Log files no longer record your Windows username from the update path.** A couple of update-related log lines wrote the full executable path (which for a per-user install includes `C:\Users\<name>\…`) without the existing path-scrubbing the rest of the app applies. They now scrub the username like everywhere else.
+- **A failed update recovers instantly instead of stalling.** If the downloaded file went missing right before applying (e.g. removed by antivirus), the updater treated it as a temporarily-locked file and retried for several seconds before giving up; it now detects the missing file immediately and reports it.
+
+## [1.42.11] - 2026-06-27
+
+### Changed
+- **The in-app updater no longer uses an on-disk script.** Applying an update previously wrote a small batch file to a temporary folder and ran it through `cmd.exe` to swap in the new build after the app closed. That left a brief window in which another program running as the same user could tamper with the script before it executed. The update is now applied entirely from within the freshly-downloaded (and already hash- and signature-checked) executable itself: it waits for the old version to close, replaces it using a staged atomic file move — so an interrupted update can never leave a half-written, unstartable executable — and relaunches, keeping your run-as-administrator state if you were elevated. There is no longer any script on disk for another process to interfere with.
+
+## [1.42.10] - 2026-06-27
+
+### Fixed
+- **The in-app updater is hardened against a local tampering window.** When applying a downloaded update, SysManager writes a small batch script that swaps in the new executable after the app closes. That script was previously written into the same predictable, user-writable folder as the download and launched via the bare `cmd.exe` name. A malicious program running as the same user could, in theory, replace the script (or plant a fake `cmd.exe` on the search path) during the brief window before it ran, getting its own commands executed by the update step. The script is now written to a fresh, randomly-named private folder, launched via the full system path to `cmd.exe`, refuses any path containing an illegal character, and cleans up its own folder afterwards. Hash and Authenticode verification of the downloaded binary were already in place and are unchanged.
+
+## [1.42.9] - 2026-06-27
+
+### Fixed
+- **System Logs detail cards regained their colour coding.** The "What this means" and "What to try" panels are tinted blue and green again to tell them apart at a glance — this time using theme-aware translucent tints, so they stay legible on light and custom themes (the previous fix had flattened them to a neutral surface).
+
+## [1.42.8] - 2026-06-27
+
+### Fixed
+- **Empty-list messages are clearer and no longer misleading.** The "nothing to show" text on Services, Startup Manager, Process Manager, Uninstaller, Windows Features and DNS & Hosts previously assumed a specific cause (e.g. "use Refresh" or "no match for the filter") even when a different one applied, and could flash briefly while a tab was still loading. The wording is now neutral and accurate in every state.
+- **Preview tabs are now released cleanly on exit.** The newer tabs (Display Profiles, Defender Tweaks, Task Scheduler, CPU Affinity, Timer Resolution, File Lock Detector, Standby List Cleaner, Dark Mode Scheduler) weren't being disposed when the app closed, so their timers and event subscriptions could linger. They're now disposed with the rest, and Defender Tweaks unsubscribes its internal handler.
+
+### Changed
+- Documentation accuracy: corrected the System-group tab order in the README and ARCHITECTURE feature tables, fixed the Windows Update description (it uses the Windows Update COM API, user-triggered — not a PSWindowsUpdate auto-check), and aligned the SECURITY supported-versions table with the "latest minor only" policy.
+
+## [1.42.7] - 2026-06-27
+
+### Fixed
+- **Process Manager keeps auto-refreshing even if one refresh hits a snag.** Its 1-second live refresh loop only handled cancellation; any other transient fault (a process vanishing mid-read, a brief WMI hiccup) would stop the auto-refresh for the rest of the session. A failed refresh is now logged and the loop simply continues, matching the Dashboard's polling.
+- **Disk and battery readings shrug off transient WMI COM faults.** System Health's reliability/SMART read and the Battery Health queries now also catch the COM-level exception WMI can throw under load, so a one-off glitch no longer drops the whole disk list or aborts the battery scan.
+- **"Trim RAM" no longer briefly freezes the window.** Emptying every process's working set (a per-process system call across hundreds of processes) now runs on a background thread, keeping the Performance tab responsive while it works.
+- **Defender status read reports errors instead of failing silently.** If reading Defender status hit a PowerShell host fault, the tab could end up stuck; it now shows a clear message.
+
+## [1.42.6] - 2026-06-27
+
+### Fixed
+- **Temp cleanup can't be tricked into deleting files outside the temp folder.** The cleanup scan already refused to descend into junctions/symlinks it found *inside* the temp tree, but didn't check whether the starting folder itself was a junction — so a redirected temp root could, in theory, lead it to enumerate (and delete) files elsewhere on disk, especially when run as administrator. The scan now treats a junction/symlink root the same way and stops immediately.
+- **Speed Test re-verifies the bundled Ookla CLI's signature every run.** The Ookla command-line tool is cached under your local app data (a user-writable folder). Its Authenticode signature was checked right after download but not on later reuse, leaving a window where a swapped binary could be launched. It is now re-verified (Ookla-signed, fail-closed) before every run, not only on first download.
+
+## [1.42.5] - 2026-06-27
+
+### Fixed
+- **Display Profiles auto-revert now restores the correct monitor.** If you applied a mode and then switched to a different display in the dropdown during the 15-second "Keep these settings?" countdown, the automatic revert could restore the *previous* display's old mode onto the *newly selected* one. The pending revert now remembers the exact display it belongs to and only ever restores that one. Also hardened against rapid display switching: an in-flight mode list for a display you've already switched away from no longer overwrites the current one.
+
+## [1.42.4] - 2026-06-27
+
+### Fixed
+- **Event Viewer detail panel and System Health bars now follow the theme correctly.** A few surfaces used fixed dark colours instead of theme brushes, so under a light or custom theme the "What this means" / "What to try" cards in System Logs, their monospace message/XML boxes, and the small health/usage bars on System Health could lose contrast (light text on a still-dark panel). They now use the shared theme brushes and adapt to any preset or custom theme.
+
+## [1.42.3] - 2026-06-27
+
+### Fixed
+- **Lists that are empty now say so, instead of showing a blank area.** Several tabs (Services, Startup Manager, Process Manager, Uninstaller, Windows Features, DNS & Hosts, Disk Analyzer) showed an empty table with no explanation when there was nothing to display or a filter matched nothing — leaving you unsure whether it was still loading, found nothing, or had failed. Each now shows a short, centred message in that case. This also fixes the empty-state messages on the Speed Test history, which previously never appeared: the visibility converter treated a list's item count as "always present", so a count of zero was misread — numeric values are now correctly treated as empty when zero.
+
+## [1.42.2] - 2026-06-27
+
+### Fixed
+- **Display Profiles applies and auto-reverts without freezing the window.** Switching resolution/refresh rate, picking a display, and the 15-second auto-revert all called the Windows display APIs (`EnumDisplaySettings` / `ChangeDisplaySettingsEx`) directly on the UI thread, so the app could briefly stop responding while the driver re-trained the panel — and that stall could hold up the very countdown meant to rescue you from a bad mode. These calls now run on a background thread, so the window and the auto-revert timer stay responsive throughout.
+- **Defender Tweaks no longer lets two changes overlap.** The PUA, Controlled Folder Access, exclusion-add and exclusion-remove actions could be triggered again while a previous change was still being written and verified, starting overlapping operations whose read-back checks could race and show a misleading "not changed" message. Each action now disables the others until it finishes, matching how the rest of the app serialises long-running operations. No change to what any action does.
+
+## [1.42.1] - 2026-06-27
+
+### Fixed
+- **System Health now reads SMART/reliability data on Storage Spaces and similar setups.** On machines where Windows surfaces disks through the Storage provider, the physical-disk identifier embeds characters (`=` and `"`) that the previous safety check rejected, so temperature, wear, power-on hours and read/write error counts were silently dropped — the drive still showed as healthy but with no detail — and a warning was written to the rotating log on every few-second refresh. The reliability counters are now read by following the disk's WMI association directly instead of rebuilding a query from the identifier, which is robust to the identifier format and needs no text parsing. Drives that genuinely expose no counters (non-elevated sessions, virtual disks) are treated as a normal empty result rather than logged as a warning. No visible change on machines that already showed full SMART detail.
+
+## [1.42.0] - 2026-06-26
+
+### Added
+- **Standby List Cleaner tab (Gaming & Profiles).** Frees cached "standby" memory to reduce stutter when RAM runs low — the built-in equivalent of ISLC. Shows live total / available / load%, purges the standby list on demand, and can auto-purge when available RAM drops below a threshold you set. Safe and non-destructive: the standby list is clean, disk-backed file cache, so clearing it loses nothing — Windows just reloads from disk on next use. Reading stats needs no admin; purging requires administrator (it enables the same privilege RAMMap/ISLC use and reports cleanly if not elevated). Marked **PREVIEW** while it's verified. Closes #325.
+
+## [1.41.0] - 2026-06-26
+
+### Added
+- **Dark Mode Scheduler tab (Customization).** Switch the Windows light/dark theme on demand, or have it follow a fixed-time schedule (e.g. dark at 19:00, light at 07:00). Optionally switches the taskbar/Start too. The theme is applied instantly (no sign-out) by writing the per-user theme setting and notifying Windows; no admin needed and fully reversible. Honest about its limits: the schedule runs while SysManager (or its tray) is open — it's not a background service. Marked **PREVIEW** while it's verified. Closes #329.
+
+## [1.40.0] - 2026-06-26
+
+### Added
+- **Task Scheduler tab (System).** Browse all Windows scheduled tasks and turn them on or off. Tasks are color-coded by type — Third-party, well-known Telemetry (CEIP / Compatibility Appraiser / Feedback / Error Reporting), and System — so it's clear what's safe to touch. Filter by name/path, optionally hide system tasks, and see each task's last/next run. Disabling is **fully reversible and never deletes a task**; system tasks show an extra confirmation warning, changes need administrator, and each toggle is verified by reading the task's state back. Marked **PREVIEW** while it's verified. Closes #334.
+
+## [1.39.0] - 2026-06-26
+
+### Added
+- **Defender Tweaks tab (Privacy & Security).** See your Microsoft Defender status at a glance (real-time protection, cloud protection, PUA and Controlled Folder Access), toggle PUA protection and Controlled Folder Access, and manage scan-exclusion folders (add/remove). Built to be safe: every change requires administrator and is **verified by reading the value back** — because Tamper Protection can silently ignore changes, the tab detects it and shows a clear warning, and never reports a change as done unless Windows actually applied it. Exclusion folders are validated (rooted, existing, no wildcards) before use, and changes are confirmed first. Marked **PREVIEW** while it's verified. Closes #344.
+
+## [1.38.0] - 2026-06-26
+
+### Added
+- **CPU Core Affinity tab (Gaming & Profiles).** Pin a running process to specific CPU cores — useful for games on Intel hybrid CPUs, where **P-cores and E-cores are detected and labelled** (via `GetLogicalProcessorInformationEx`). One-click "P-cores" / "All cores" presets, a per-core checkbox map, Apply and Restore. Affinity is per-running-process and is lost when the process exits, so it's inherently temporary and reversible; no admin needed for your own processes (changing another user's process is surfaced as needing admin, not a crash). An empty core selection is rejected (Windows would treat 0 as "let the OS decide"). Marked **PREVIEW** while it's verified. Closes #327.
+
+## [1.37.0] - 2026-06-26
+
+### Added
+- **Display Profiles tab (Gaming & Profiles).** Quickly switch resolution and refresh rate per monitor — e.g. 165 Hz for gaming, 60 Hz for work — from the list of modes your display actually supports, using only the Windows display APIs (no NVIDIA/AMD tool conflict). Safe by design: changes apply for the session (a reboot reverts), and a **15-second auto-revert** restores the previous mode unless you confirm "Keep", so a bad mode can never strand you on a blank screen. Each mode is validated before applying; no admin needed. Marked **PREVIEW** while it's verified. Closes #328.
+
+## [1.36.0] - 2026-06-26
+
+### Added
+- **File Lock Detector tab (Monitor).** When you hit a "file is in use" error, enter or browse to the file/folder and see exactly which process is holding it — name, PID, type and start time — via the Windows Restart Manager (the same mechanism Explorer's own dialog uses). You can end a selected locking process (with confirmation) to release the file; critical system processes are protected. Detecting works as a standard user; ending a process owned by SYSTEM or another user needs admin (surfaced cleanly, never crashes). Marked **PREVIEW** while it's verified. Closes #333.
+
+## [1.35.0] - 2026-06-26
+
+### Added
+- **Timer Resolution tab (Gaming & Profiles).** Request the finest Windows timer resolution (≈0.5 ms instead of the ~15.6 ms default) to reduce input latency in games, and restore it with one click. Shows the live current/finest/default values — it re-queries the *effective* resolution rather than echoing the request, so the number is honest even when Windows stops honoring it (e.g. while minimized on Windows 11). Fully reversible and no admin needed; includes a clear power-consumption warning. Marked **PREVIEW** while it's verified. Closes #326.
+
+## [1.34.0] - 2026-06-26
+
+### Added
+- **"Preview" marking for newly added features.** Features that are implemented but not yet fully verified now show a small **PREVIEW** pill next to their name in the sidebar and a short banner at the top of the page, so it's clear which tabs are brand-new. This lets new features ship and be tried out while they're still being polished.
+
+## [1.33.16] - 2026-06-26
+
+### Changed
+- **Moved "Environment Variables" from the Customization group to Advanced**, next to Profile Export/Import — it's a system/developer tool, not a UI-customization one. The tab itself is unchanged.
+- **Moved "App Alerts" from Privacy & Security to the Monitor group.** App Alerts passively watches for newly installed apps and keeps a timestamped history — it observes rather than enforces, so it belongs alongside the other monitoring tabs. The tab itself is unchanged.
+- **Moved "Legacy Panels" from the System group to Info.** It's a read-only launcher for classic Windows applets (Device Manager, Disk Management, etc.) with no system modification, so it sits better among the other read-only Info tabs. The tab itself is unchanged.
+- **Quick Cleanup now separates "Clean up" from "Repair Windows".** Clean TEMP / Empty Recycle Bin / Rescan and the SFC / DISM repairs were previously one mixed row of buttons; they're now two labelled sections so it's clear which actions free space and which repair Windows. Also added accessible names to all the action buttons for screen readers.
+
+## [1.33.15] - 2026-06-26
+
+### Fixed
+- **Faster, smoother startup — several tabs no longer read the registry or probe drives on the UI thread while the app launches.** The Privacy & Telemetry, Environment Variables, App Blocker, Duplicate Finder, Disk Analyzer, and Profile Export/Import tabs loaded their initial data synchronously as the window was being built, which could briefly freeze launch (worst case: a stalled or disconnected drive). Each now loads in the background like the other tabs, so the window appears promptly and the tab fills in a moment later.
+
+## [1.33.14] - 2026-06-26
+
+### Fixed
+- **Quick Cleanup empties the Recycle Bin the same reliable way as the rest of the app.** It used a PowerShell `Clear-RecycleBin` call that can leave "ghost" entries behind; it now uses the shared shell-API helper (the same one Deep Cleanup and the One-Click Tune-Up use), which clears every drive's bin cleanly. Keeps the three entry points from drifting apart.
+
+## [1.33.13] - 2026-06-26
+
+### Fixed
+- **Traceroute monitor no longer risks a background error when stopped mid-cycle.** Stopping the live traceroute monitor disposed its cancellation source unconditionally, even if a route was still being traced; the still-running cycle could then throw on the disposed token in the background. Disposal is now deferred until the cycle actually finishes, matching the ping monitor. No visible change in normal use.
+
+## [1.33.12] - 2026-06-26
+
+### Fixed
+- **Sidebar navigation items are now announced correctly by screen readers.** Each tab in the sidebar exposes its name (e.g. "Dashboard", "System Health") to assistive technology and UI automation; previously the items had no accessible name and were announced only as an internal type name. No visual change.
+
+## [1.33.11] - 2026-06-26
+
+### Fixed
+- **Recycle Bin size estimate on the Cleanup tab now counts every fixed drive, not just C:.** It previously looked only at `C:\$Recycle.Bin`, so deleted files on other drives weren't reflected in the estimate. It now sums the hidden `$Recycle.Bin` on each ready fixed drive.
+- **App Blocker no longer assumes Windows is installed on C:.** The sentinel path it writes to block an app is now derived from the real system directory instead of a hardcoded `C:\Windows\System32`, so blocking works on systems where Windows lives on another drive. Existing blocks are unaffected (the value is compared case-insensitively).
+
+## [1.33.10] - 2026-06-25
+
+### Fixed
+- **The Dashboard's Quick Cleanup now uses the same safe temp cleaner as the One-Click Tune-Up.** It previously had its own inline cleaner that only looked at the top level of the user TEMP folder, ignored the Windows TEMP folder, and silently swallowed every error. It now cleans both temp folders and never follows a junction or symbolic link out of the temp tree, so it can't be redirected into unrelated files — matching the protection already used elsewhere.
+
+## [1.33.9] - 2026-06-25
+
+### Fixed
+- **The Camera/Mic/Location tab no longer reads the registry on the UI thread at startup.** Its access history was loaded synchronously while the main window was being built, so the registry walk ran on every launch — even though most people never open the tab — and an unreadable or corrupt consent-store entry could surface as a startup failure. It now loads in the background like the other tabs (with a Cancel-able refresh) and a damaged entry is skipped instead of bubbling up.
+
+## [1.33.8] - 2026-06-25
+
+### Changed
+- **Removed the duplicate "Reset Network Stack" button from System Fixes.** The same Winsock + TCP/IP reset and DNS flush already lives on the Network → Network Repair tab (as individual one-click tools), so having it in two places was confusing and risked the two copies drifting apart. System Fixes now links to Network Repair for network resets instead of duplicating them.
+- **Renamed the "Privacy Monitor" tab to "Camera/Mic/Location"** so it is no longer confused with the separate "Privacy & Telemetry" tab. The feature is unchanged — it still shows which apps recently used your camera, microphone, or location.
+
+### Fixed
+- **Performance Mode's "Create restore point" now uses the same code as the Restore Points tab.** The two had separate implementations of the same operation that had begun to diverge; they now share one, which also enables System Restore on the system drive first if it was turned off. No visible change beyond that improvement.
+
+## [1.33.7] - 2026-06-25
+
+### Changed
+- **Boot Analyzer: hardened the event-XML reader to tolerate alternate payload shapes.** The boot-performance reader already parses the standard `<EventData><Data Name="BootTime">` form that Windows emits, and that path is unchanged. This adds a defensive fallback that also resolves directly-named child elements (matched by local name, namespace-agnostic) for any event variant that nests its fields differently, so the reader is robust across builds. No behavior change on current Windows — the boot history is read exactly as before.
+
+## [1.33.6] - 2026-06-25
+
+### Fixed
+- **The Debloater now correctly protects the Photos app from removal.** The system-critical denylist listed `Microsoft.Windows.Photos.Settings`, but the real package name is `Microsoft.Windows.Photos` — and because the match is a prefix check, the shorter real name never matched, so Photos was offered as removable. The entry is now the correct family name. A redundant, never-matching Windows Security entry was also removed (the correct one was already present). Added tests covering each critical package by its real name, plus tests confirming removal refuses a protected package and rejects an injection-shaped package name without ever invoking PowerShell.
+
+## [1.33.5] - 2026-06-25
+
+### Fixed
+- **Profile Export/Import now correctly handles the theme/appearance section.** The exporter looked for every config file under one folder (Local AppData), but the theme is saved under Roaming AppData — so exporting never picked up your theme, and importing a profile wrote the theme to a folder the app doesn't read on startup, making it a silent no-op. Each config file is now read from and written to the same folder its owning feature uses (theme under Roaming, speed-test history under Local), so theme export and import actually take effect.
+
+## [1.33.4] - 2026-06-25
+
+### Fixed
+- **"Undo" on the DNS & Hosts tab now fully restores the previous setting, including IPv6.** Applying a filtering preset configures both IPv4 and IPv6 resolvers, but Undo only captured and restored IPv4 — so reverting an ad/family-blocking preset left its IPv6 resolvers active, and on a dual-stack network the "undone" filtering was often still in effect. Undo now snapshots both families before a change and, on restore, clears the adapter's DNS first (removing anything applied since) before re-applying exactly what was captured. Undo is also offered now even if a change only partially applied. Additionally, programming the IPv6 resolvers is treated as best-effort: on a machine with IPv6 disabled the IPv4 change still succeeds (and stays undoable) instead of the whole apply failing.
+
+## [1.33.3] - 2026-06-25
+
+### Fixed
+- **Editing an environment variable no longer breaks `%VAR%` expansion in PATH and similar variables.** SysManager wrote every variable as a plain string (REG_SZ), which silently converted variables Windows stores as expandable (REG_EXPAND_SZ) — most importantly the system `Path` — and froze references like `%SystemRoot%` or `%JAVA_HOME%` to whatever they happened to expand to at edit time, so they stopped tracking their source variable. Variables are now written directly to the registry with their original type preserved (a variable that was expandable stays expandable, and a new value containing a `%token%` is created as expandable), and the editor now shows and round-trips the raw `%VAR%` tokens instead of their expanded form. A single `WM_SETTINGCHANGE` broadcast still notifies running programs after a batch of changes.
+
+### Added
+- **Restore button on the Environment Variables tab.** The one-time backup taken before your first change can now be restored from inside the app: every variable is rewritten to its original value (type preserved) and any variable added since is removed. The Apply confirmation already promised this was possible — now there's a button for it. (System-scope restore needs administrator rights; if the safety backup can't be written, Apply now stops without making any change instead of risking an unbacked edit.)
+
+## [1.33.2] - 2026-06-25
+
+### Fixed
+- **The Privacy Monitor no longer risks failing to open if the Windows access-history store contains an unusual entry.** Decoding an app's name from a desktop-app entry whose key was made up only of path separators could throw and, because the tab is built at start-up, prevent the window from loading. The decoder now falls back to the raw key name for such entries, and a single unreadable or malformed entry is skipped instead of aborting the whole scan. Also refined "in use now" detection so an app whose most recent start is newer than its last stop (e.g. after a force-close) is correctly shown as currently using the device, and the "last used" time now reflects the most recent of the two timestamps.
+
+## [1.33.1] - 2026-06-25
+
+### Fixed
+- **Browser Cleaner now refuses to follow junctions or symbolic links out of a browser's own folders.** The reparse-point safety check failed *open* — if a folder's attributes couldn't be read it was treated as a normal folder and traversed — and the file-deletion path skipped the check entirely, so a junction or link placed inside a browser profile directory (something a standard user can create without administrator rights) could redirect a clean to measure or delete files outside the browser tree. The check now fails *safe* (an unreadable entry is treated as a link and skipped), runs before every measure and delete on both files and folders, and matches the behavior already used by Deep Cleanup and the File Shredder. The Firefox "Cache" entry now targets each profile's `cache2` cache folder specifically, instead of the whole profile directory — so a Firefox clean can never touch saved logins, bookmarks, or preferences.
+
+## [1.33.0] - 2026-06-25
+
+### Added
+- **Boot Analyzer tab** (System group). The placeholder is now a working tab that reads the Windows boot-performance history (the Diagnostics-Performance log) and shows how long your PC takes to boot — total, core (main path), and desktop ready-up time — across recent boots, with a trend versus your recent average. A second list shows the apps, drivers, services, and devices Windows flagged as slowing boot, with the delay attributed to each. Read-only; reading the log requires administrator (the tab shows the standard elevation banner).
+
+## [1.32.0] - 2026-06-25
+
+### Added
+- **Privacy Monitor tab** (Monitor group). The placeholder is now a working tab that shows which applications recently used your **camera, microphone, or location**, and when — read from the Windows access history (the CapabilityAccessManager consent store). Devices currently in use are flagged and sorted to the top. Read-only: to grant or revoke a permission, an **Open privacy settings** button hands off to Windows — SysManager never changes capability permissions itself.
+
+## [1.31.0] - 2026-06-24
+
+### Added
+- **Browser Cleaner tab** (Privacy & Security). The placeholder is now a working tab that scans installed browsers — Chrome, Edge, Brave, Opera, and Firefox — and shows the on-disk size of each cleanable category (cache, history, cookies, sessions). Tick what to remove and clean it after a confirmation. Cookies and sessions are flagged "signs you out" and left **unticked by default**, so a clean never logs you out by accident. Cache and history are pre-selected. Cleaning is per-user (no admin); locked files (browser open) are skipped rather than forced, and reparse points are never followed.
+
+## [1.30.0] - 2026-06-24
+
+### Added
+- **Windows Update timing & deferral controls** (Windows Update tab). A new "Update timing & deferral" section lets you **defer feature updates** by a configurable number of days while security and quality updates keep installing, **pause all updates** for a bounded window (up to 35 days, after which Windows auto-resumes), and **Restore default** to return to standard behavior. It uses the documented Windows Update policy registry keys and is fully reversible. There is deliberately no "disable updates forever" option — the strongest action is a clearly-bounded pause, so a machine is never left permanently unpatched. Requires administrator.
+
+## [1.29.0] - 2026-06-24
+
+### Added
+- **BIOS & firmware section in System Health.** A scan now also reports your BIOS version, release date, and vendor, the motherboard model, the boot mode (UEFI / Legacy), and Secure Boot status — all read-only. A **Find BIOS update** button opens the right manufacturer support page (ASUS, MSI, Gigabyte, ASRock, Dell, HP, Lenovo, Acer, Biostar, or a web search as a fallback) based on the detected motherboard, and **Copy info** copies the board model + BIOS version for support searches. SysManager never flashes firmware itself; the section includes a clear reminder that BIOS updates carry risk if interrupted.
+
+## [1.28.0] - 2026-06-24
+
+### Added
+- **Profile Export/Import tab** (Advanced group). The placeholder is now a working tab that exports SysManager's own configuration — theme/appearance and speed-test history — to a single portable JSON file, and imports it on another PC. Export is selective (tick which sections to include); import shows what the profile contains and asks for confirmation before overwriting, supports selective per-section apply, and refuses profiles made by a newer, incompatible version. Only SysManager's own config is ever touched — never system settings — so importing is fully reversible.
+
+## [1.27.0] - 2026-06-24
+
+### Added
+- **DNS filtering presets and IPv6** (DNS & Hosts tab). The DNS preset switcher now includes ad/malware/family-blocking variants — Cloudflare Malware-blocking (1.1.1.2) and Family (1.1.1.3), AdGuard DNS (ad/tracker blocking, plus a Family variant), and OpenDNS FamilyShield — each with a short description of what it blocks. Every preset now also configures IPv6 resolvers automatically alongside IPv4. The existing "Reset to automatic (DHCP)" undo continues to work for all variants.
+
+## [1.26.0] - 2026-06-24
+
+### Added
+- **System Fixes tab** (System group). A consolidated panel for common one-click Windows repairs, each with a plain-English description and a confirmation before it runs: **Reset Windows Update** (stop services, clear the SoftwareDistribution/catroot2 caches, restart services), **Reset Network Stack** (Winsock + TCP/IP reset and DNS flush), and **Reinstall WinGet** (re-register the App Installer when app installs/uninstalls fail). A **Set up Auto Sign-in** shortcut opens the built-in User Accounts dialog so Windows stores the credential securely — SysManager never handles your password. Repairs run with live output and report success or failure honestly. They modify system state and require administrator rights (standard elevation banner).
+
+## [1.25.0] - 2026-06-24
+
+### Added
+- **Legacy Panels tab** (System group). A one-click launcher for the classic Windows applets that newer releases keep burying — Control Panel, Sound, Power Options, Network Connections, Region, System Properties, User Accounts, Device Manager, Computer Management, Programs and Features, Mouse, and Date and Time. Each is a pure launcher that just opens the built-in panel; nothing is modified, so no elevation or confirmation is needed. The applet list is hard-coded, so no input ever reaches the process launcher.
+
+## [1.24.0] - 2026-06-24
+
+### Added
+- **Debloater & Ads tab.** The Privacy & Security group's "Debloater & Ads" placeholder is now a working tab. Scan installed Windows Store apps and remove the ones you don't use — with a curated "common bloat" preset that pre-selects safe, frequently-removed apps (Bing News/Weather, Clipchamp, Solitaire, Xbox apps, Teams consumer, and more). System-critical packages (the Store itself, frameworks, security and shell components) are denylisted: they're shown but can never be selected or removed. Removal runs per-user with an impact summary and confirmation first, and is reversible — any removed app can be reinstalled from the Microsoft Store. Search and per-app descriptions help you decide what each app is before removing it.
+
+## [1.23.0] - 2026-06-24
+
+### Added
+- **Restore Points tab.** The System group's "Restore Points" placeholder is now a working tab. List every Windows System Restore point (sequence number, date, description, and type, newest first), create a new restore point with an optional description, and restore the PC to a selected point. Creating and restoring require administrator rights (the tab shows the standard elevation banner); viewing the list does not. Restoring warns clearly that Windows will restart and asks for confirmation first. Creating also enables System Restore on the system drive if it was off, and notes Windows' once-per-24-hour limit.
+
+## [1.22.0] - 2026-06-24
+
+### Added
+- **Environment Variables tab.** The Customization group's "Environment Variables" placeholder is now a working tab. View and edit both User and System (machine-wide) variables in one grid, filter by scope, and search by name or value. A dedicated PATH editor opens for PATH-like variables: reorder directories, remove entries, strip duplicates in one click, and see missing folders highlighted. Add or remove variables too. Edits stay local until you press *Apply*; a one-time JSON backup of every variable is written first so the original environment can be restored. System-scope changes require administrator rights (the tab shows the standard elevation banner); User-scope changes do not. Changes broadcast to Windows so new terminals pick them up without a reboot.
+
+## [1.21.0] - 2026-06-24
+
+### Added
+- **System Report tab.** The Info group's "System Report" placeholder is now a working tab. Click *Generate* to gather a full, read-only snapshot of this PC — operating system, CPU, memory (with per-slot detail), GPU, motherboard, storage health (including SMART temperature, wear, and power-on time when available), and active network adapters. Export the report as plain text, a styled self-contained HTML page, or structured JSON, or copy it to the clipboard. The report is read-only: nothing on the system is changed, and the file is written only where you choose — nothing leaves the machine.
+
+## [1.20.67] - 2026-06-24
+
+### Changed
+- **Removed the temporary administrator-state startup logging.** The diagnostic added while investigating the "tabs still ask for admin after elevating" report has done its job and is no longer written. The underlying fix (the elevated relaunch now reliably lands in the elevated window) stays in place.
+
+## [1.20.66] - 2026-06-24
+
+### Fixed
+- **The System Logs tab is no longer blank.** One of the severity summary cards (Warnings) set a glow effect's colour from a brush resource instead of a colour value, which threw when the tab's view was first built and left the whole tab empty. The glow now uses the colour directly, matching the other cards, so the tab renders normally.
+- **The Privacy and Windows Features tabs no longer show two "running as administrator" notices at once.** When elevated, each of those tabs displayed both the standard full-width administrator banner and a small redundant "Administrator" chip in the toolbar. The redundant chip has been removed; the standard banner remains (and the Windows Features "Reboot pending" chip is unaffected).
+
+## [1.20.65] - 2026-06-24
+
+### Fixed
+- **"Run as administrator" now reliably lands you in the elevated window instead of leaving the tabs still asking for admin.** The app allows only one instance at a time, enforced by a system-wide lock. When you clicked "Run as administrator", the elevated copy started while the original (non-elevated) window was still closing and had not yet released that lock — so the elevated copy saw "another instance is already running", brought the *old* non-elevated window back to the foreground, and exited. You were left on the non-elevated instance, where the tabs that need admin still showed the "needs administrator" notice. The elevated relaunch now hands the single-instance lock over to the new instance (it waits briefly for the old one to release it), so you end up in the actually-elevated window.
+
+### Changed
+- **Added administrator-state logging at startup** to confirm the fix above and catch any residual case. On launch the app records, to its local log file only, the process elevation state (Windows token elevation type + process ID) and each affected tab's administrator status, under `%LocalAppData%\SysManager\logs` with usernames scrubbed — nothing is sent anywhere.
+
+## [1.20.64] - 2026-06-24
+
+### Fixed
+- **The broken-shortcut scan no longer stops early at the first unreadable folder, and no longer mislabels long-target shortcuts as broken.** The scan used a recursive enumerator that threw the moment it reached a folder it couldn't read (e.g. a protected Start Menu subfolder), which aborted the rest of that location and silently skipped every shortcut after it. It now walks folder-by-folder and skips only the unreadable ones (and skips junction/symlink folders so it can't be redirected out of the tree). Separately, shortcut targets were read into a 260-character buffer, so a target longer than that was truncated and the shortcut wrongly reported as broken — the buffer is now large enough to hold extended-length paths.
+
+## [1.20.63] - 2026-06-24
+
+### Fixed
+- **The Process Manager no longer loses your selected row every second.** The list auto-refreshes once a second, and each refresh rebuilt the whole collection — which cleared the row you had selected (and your scroll position) and re-extracted every process icon each time. The refresh now updates the existing rows in place: surviving processes keep their row (and your selection), new processes are added, exited ones are removed, and icons are only fetched for newly-appeared processes.
+
+## [1.20.62] - 2026-06-24
+
+### Fixed
+- **"Enable All" on the Startup tab now reports honestly when some items can't be enabled.** It used to always say "All items enabled" even if a registry write failed (for example, an item that needs administrator rights), hiding the failure. It now counts the results and reports how many were enabled and how many could not be — and says so when everything was already enabled.
+- **Startup actions can no longer overlap.** Scan, Enable All and the per-item toggle all read or write the same startup registry/task state; running two at once could interleave their writes and produce inconsistent counts. They are now disabled while one of them is running.
+
+## [1.20.61] - 2026-06-24
+
+### Fixed
+- **Starting a scan or uninstall on the Uninstaller tab while another is running no longer risks a crash.** Both the Scan and Uninstall actions re-create one shared cancellation source, so triggering a second action while the first was still running could dispose the cancellation source the first was using and throw. Those two actions are now disabled while one of them runs — matching the App Updates, Windows Update and Bulk Installer tabs — while Cancel stays available.
+
+## [1.20.60] - 2026-06-24
+
+### Fixed
+- **Scanning Windows optional features while a feature toggle is running no longer mixes up their output.** The Scan and enable/disable actions share one PowerShell runner, and each subscribes to its output independently. Toggling was already blocked while busy, but Scan was not — so starting a scan mid-toggle let both read the same output stream and cross-contaminate results. Scan is now disabled while a toggle runs (and vice versa), making the two mutually exclusive.
+
+## [1.20.59] - 2026-06-24
+
+### Fixed
+- **The App Updates and Context Menu tabs no longer risk a crash when their actions overlap.** On both tabs the long-running actions shared one cancellation source that each action re-created. Starting a second action while the first was still running (e.g. clicking Scan again mid-upgrade, or applying a context-menu preset while a scan ran) could dispose the cancellation source the first was still using and throw. Those actions are now disabled while one of them is running — matching how the Windows Update and Bulk Installer tabs already behave — while Cancel stays available. On the Context Menu tab this also prevents two overlapping runs from corrupting the entry list or triggering two Explorer restarts at once.
+
+## [1.20.58] - 2026-06-24
+
+### Security
+- **The file shredder can no longer be tricked into destroying a system file through a junction in the middle of the path.** Its safety check resolved a link only at the end of the path (and expanded short `8.3` names), but a junction or symlink in a *parent* folder — which a standard user can create without admin — was not followed during validation. A path such as `C:\Temp\link\notepad.exe`, where `C:\Temp\link` pointed into `System32`, slipped past the system-folder denylist and the real protected file behind it was overwritten and deleted. The shredder now asks Windows for the fully-resolved canonical path (collapsing every junction/symlink anywhere in the chain) and re-checks that against the protected-folder list before touching anything.
+
+## [1.20.57] - 2026-06-24
+
+### Security
+- **The Uninstaller no longer runs a per-user app's uninstaller from a user-writable folder while elevated.** When SysManager ran as Administrator, uninstalling a local app executed the path from its registry `UninstallString` (and any DLL a `rundll32` command would load). That path was trusted even when it pointed inside `%LocalAppData%`, which a standard user can write to — and the uninstall key in `HKCU` is also user-writable. An unprivileged attacker could therefore plant a binary there plus a fake uninstall entry, then have an elevated SysManager run it with admin rights (local privilege escalation). Admin-protected locations (Program Files, Windows, ProgramData) stay trusted as before; the per-user location is now trusted only when SysManager is *not* elevated, so normal per-user uninstalls (e.g. VS Code, Discord) are unaffected.
+
+## [1.20.56] - 2026-06-23
+
+### Fixed
+- **SFC and DISM repairs can no longer run at the same time and corrupt each other's output.** Both share a single PowerShell runner whose output event was subscribed by each command independently, so starting one while the other ran cross-contaminated their captured results and progress. They now acquire a shared system-modification lock, making them mutually exclusive (and blocked against other system-repair operations), with a clear "already running" message instead.
+
+## [1.20.55] - 2026-06-23
+
+### Security
+- **Deep Cleanup can no longer delete data outside a cache folder via a junction at its root.** The reparse-point guard that stops cleanup from following junctions/symlinks only covered sub-folders, not the cleanup root itself. A junction planted at a cleanup-root path (which a normal user can create without admin) was traversed directly, so the linked target's files could be deleted. The traversal now checks the root for being a reparse point first, and the per-file delete catches only the expected I/O/access exceptions instead of all exceptions.
+
+## [1.20.54] - 2026-06-23
+
+### Fixed
+- **Cancelling a disk-usage or large-files scan no longer shows partial results as if complete.** Both scanners stopped mid-traversal on cancel but still returned what they had gathered, so a cancelled scan looked like a finished one with incomplete data. They now stop cleanly and report the scan as cancelled.
+- **Traceroute now stops correctly when the destination replies on any probe.** The hop status and the stop-at-destination check used only the last probe's result, so if an earlier probe reached the destination but a later one timed out, the trace could mislabel the hop and keep probing past the target. It now tracks the destination-reached result across all probes of each hop.
+
+## [1.20.53] - 2026-06-23
+
+### Fixed
+- **Dashboard quick actions now ask before changing your system.** "Quick Cleanup" deleted temporary files and "Update All Apps" ran a winget upgrade of every installed app with no confirmation — unlike the equivalent actions on their dedicated tabs. Both now show a confirmation dialog first, matching the rest of the app.
+- **Installing Windows updates now asks for confirmation.** Selecting updates and clicking install applied them (including drivers and feature updates that can force a restart) without a prompt. A confirmation dialog now precedes the install.
+- **Deleting broken shortcuts no longer races other disk operations.** The shortcut cleaner's delete now holds the shared disk operation lock for its duration, so it can't run at the same time as a cleanup or tune-up.
+
+## [1.20.52] - 2026-06-22
+
+### Fixed
+- **Cancelling a speed test now stops the ping phase immediately.** The initial latency measurement ran four 2-second probes without honoring the cancellation token, so pressing Cancel during the ping phase could wait up to 8 seconds before stopping. The probes now observe cancellation and stop right away.
+
+## [1.20.51] - 2026-06-22
+
+### Security
+- **The file shredder now expands 8.3 short paths before its system-folder safety check.** The guard that blocks shredding inside Windows/System32/Program Files compared full paths, but a short-name alias (e.g. `C:\PROGRA~1`) isn't expanded by the framework, so it could slip past the check. Short paths are now expanded to their long form first, closing that bypass.
+
+## [1.20.50] - 2026-06-22
+
+### Fixed
+- **Reverse-DNS lookups during a traceroute no longer keep running after they time out.** Each hop's host-name lookup had an 800 ms budget, but the timeout only abandoned the wait — the lookup itself kept running in the background. It is now actually cancelled when the budget elapses, freeing the resource immediately.
+
+## [1.20.49] - 2026-06-22
+
+### Fixed
+- **Removed a rare crash risk in the network ping chart.** The per-host line offset used `Math.Abs` on a hash code, which throws if the hash happens to be the most-negative integer. The calculation now masks the sign bit instead, so it can never overflow.
+
+## [1.20.48] - 2026-06-22
+
+### Fixed
+- **Hardened the Zip Slip guard on the speed-test CLI download.** The containment check that keeps extracted archive entries inside the tools directory used a plain prefix test, which a sibling folder whose name merely started with the target's name could slip past. The check now requires a directory-separator boundary, closing that edge case.
+
+## [1.20.47] - 2026-06-22
+
+### Fixed
+- **Disk health no longer drops every disk when one reports a bad value.** If a single physical disk returned an unexpected value for its media type, bus type, size, or health status, the conversion threw and aborted the whole scan — so no disks were shown. A disk with an unreadable field is now skipped individually and the rest still appear.
+
+## [1.20.46] - 2026-06-22
+
+### Fixed
+- **Windows Update scans and installs no longer leak COM objects on error paths.** Reading an update's KB article list left its underlying COM collection unreleased on every scanned update, and a failed install (one that threw a COM error) leaked the update-installer object. Both are now released deterministically even when the operation throws.
+
+## [1.20.45] - 2026-06-22
+
+### Fixed
+- **Saving or restoring the hosts file no longer freezes the window.** The Hosts editor wrote the system hosts file (and restored it from backup) synchronously on the UI thread, so the app could hang briefly while the file was written to or copied from System32. Both operations now run in the background.
+
+## [1.20.44] - 2026-06-22
+
+### Fixed
+- **Better screen-reader support for tables and per-row toggles.** Every data table announced itself generically as "Data table"; each now has a content-specific name (Installed applications, Running processes, Windows services, Event log entries, etc.). The per-row enable/disable toggles in Startup Manager and Windows Features, the Startup "hide system entries" toggle, and the Shortcut Cleaner selection checkboxes also gained clear accessible names. No visual change.
+
+## [1.20.43] - 2026-06-22
+
+### Fixed
+- **App-install monitoring can no longer start twice and leak a timer.** Starting the App Alerts monitor a second time without stopping it first orphaned the previous background timer and added duplicate folder watchers. Starting now does nothing if monitoring is already running.
+- **Listing fixed drives no longer aborts if one drive becomes unavailable mid-scan.** Reading a volume's label/size could throw if the drive dropped out or was locked (e.g. BitLocker) right after it was checked as ready; that one drive is now skipped instead of failing the whole list.
+- **Process icons resolve correctly for apps installed after launch.** A failed icon-path lookup was cached permanently, so a program installed later never got its icon until restart. Only successful lookups are cached now.
+- **A corrupt cached app icon no longer sticks forever.** If a downloaded icon was truncated/corrupt, the bad cache file was kept and reused; it's now deleted and re-downloaded on next use.
+- **Shortcut Cleaner reports an accurate deletion count.** Moving a broken shortcut to the Recycle Bin could silently fail (the shell reports failure without throwing) yet still be counted as deleted; only genuinely recycled items are counted now.
+
+## [1.20.42] - 2026-06-17
+
+### Fixed
+- **Deleting broken shortcuts no longer freezes the window.** The Shortcut Cleaner ran the shell delete on the UI thread, so removing many shortcuts could hang the app until it finished; the delete now runs in the background.
+- **Loading the full installed-apps list no longer freezes the App Alerts tab.** "Show all installed apps" walked the entire registry uninstall tree on the UI thread; that scan now runs in the background.
+- **Refreshing the System Logs twice in a row no longer mixes results.** Starting a second refresh while one was running could let the cancelled run's leftover batches land in the new list. The Refresh button is now disabled while a scan is in progress.
+- **Applying a Context Menu preset no longer freezes the window.** Applying a preset ran the registry changes and the Explorer restart on the UI thread, briefly hanging the app; that work now runs in the background.
+
+## [1.20.41] - 2026-06-17
+
+### Fixed
+- **"Restore All" in Performance Mode now fully clears the saved baseline.** After restoring everything to the original state, the on-disk snapshot was left behind, so the next change reloaded the now-reverted values as its baseline — a later "Restore All" could then re-apply stale settings. The saved snapshot is now deleted when you restore all.
+- **Applying several performance tweaks at once can no longer race the baseline capture.** The independent Apply buttons (power plan, visual effects, Game Mode, Xbox Game Bar, GPU, processor state) each captured the "before" snapshot without coordination, so two run together could both think no baseline existed. Baseline capture is now serialized so the original state is recorded exactly once.
+
+## [1.20.40] - 2026-06-17
+
+### Fixed
+- **The Health Score no longer fails outright when a system query hits a transient WMI error.** A repository or RPC fault while reading system info, disk health, or battery could throw an error the score didn't handle, failing the whole calculation; each source now degrades gracefully and the score is still produced from the rest.
+- **The memory-error check no longer counts a *passing* memory test as an error.** It counted every Windows Memory Diagnostic result, including the "no errors found" result (event 1101), as a problem; it now counts only the actual error result (event 1201).
+- **Known-folder lookup (Downloads, Documents, etc.) now falls back correctly when the system call fails.** The call's failure code was being ignored, so a failed lookup could return an empty path instead of using the standard fallback location; the result is now checked and the fallback applies.
+
+## [1.20.39] - 2026-06-17
+
+### Fixed
+- **A transient system-info failure can no longer crash the app from the tray.** The system tray refreshes a CPU/RAM/uptime tooltip on a background timer; if the underlying WMI query failed transiently (for example "RPC server unavailable"), the error could go unhandled and bring the whole app down. The tray refresh now handles those failures and simply skips that tick.
+
+## [1.20.38] - 2026-06-17
+
+### Fixed
+- **External command output is no longer occasionally truncated.** Results from tools like the network repair commands, chkdsk, and winget are read on background threads; the app could snapshot the captured text a moment before the last lines arrived, dropping them. The runner now waits for the output streams to fully drain before returning.
+- **The Speed Test no longer leaves a stray `speedtest.exe` running if it is cancelled or times out mid-transfer.** Cancellation during the result read could skip the cleanup that kills the CLI process; the process is now always terminated on cancellation.
+- **Captured output from chkdsk and the winget upgrade scan is now collected safely.** Both gathered command output into a list that two background reader threads wrote to at once, which could drop or corrupt lines; they now use a thread-safe collector.
+
+## [1.20.37] - 2026-06-17
+
+### Fixed
+- **Windows Update and Bulk Installer buttons no longer cause an error when clicked during a running operation.** The toolbar actions (List updates / History / Pending reboot / Install selected, and Bulk Installer's Install Selected) stayed clickable while one was already running; a second click could cancel the first operation's work and crash it. These actions are now disabled while one is in progress and re-enable when it finishes.
+
+## [1.20.36] - 2026-06-17
+
+### Fixed
+- **The Dashboard's live temperature readings now resume after you leave and return to the tab.** Temperature polling was started only once at launch; navigating away stopped it permanently, so on returning to the Dashboard the temperatures stopped updating until the app was restarted. Temperature polling now restarts together with the rest of the live vitals whenever the Dashboard is shown again.
+- **The Dashboard Event Log check no longer leaks system handles.** Counting recent critical events read each event record without releasing it, leaking a Windows event-log handle per event on every scan. Each record is now disposed as it is read.
+
+## [1.20.35] - 2026-06-17
+
+### Fixed
+- **Several panels are now legible in light themes.** A number of cards, banners, and badges (Deep Cleanup safety note and action row, Privacy toggle rows, the File Shredder SSD warning, Quick Cleanup SFC/DISM result cards, the Speed Test info banner, the Windows Features "reboot pending" badge, the Bulk Installer status/installed badges, and the work-in-progress badge) used fixed dark colours that did not change with the theme, so their text became hard to read on the light presets. They now use theme-aware colours and adapt to the active theme.
+- **The File Shredder "Shred All" button is readable again.** It showed red text on the indigo primary-button background (very low contrast); it now uses the standard red danger-button style with white text.
+
+## [1.20.34] - 2026-06-17
+
+### Fixed
+- **Re-enabling a service now restores its original startup type instead of always setting it to Manual.** When you disabled a service, SysManager forgot what its startup type had been, and "Enable" always set it to Manual — so a service that was originally Automatic (for example) would not start on the next boot as it used to. Disabling now remembers the previous startup type and Enable restores it exactly.
+
+## [1.20.33] - 2026-06-17
+
+### Fixed
+- **Temp cleanup can no longer delete files outside the temp folders by following a junction or symbolic link.** Both the Quick Cleanup temp sweep and the background tune-up temp cleanup recursed into reparse points (directory junctions / symbolic links) inside `%TEMP%`, so a link pointing elsewhere could cause real user data outside the temp tree to be deleted. Both now skip reparse points during the walk and only ever remove the link itself, never its target.
+
+## [1.20.32] - 2026-06-17
+
+### Fixed
+- **Windows Update no longer leaks system resources during scan and install.** Each scanned and installed update holds several underlying Windows Update COM objects (the update's identity, category list, downloader, and child collections). Some of these were only released on the success path, so a cancelled scan, a failed download, or a category match leaked a handle every time. All of them are now released on every path, including errors and cancellation.
+
+## [1.20.31] - 2026-06-17
+
+### Fixed
+- **DNS changes now report failure honestly instead of a false success.** Applying, resetting, or restoring DNS ran the underlying command without treating its errors as fatal, so a change that was actually rejected (for example without administrator rights, or when the adapter dropped) could still be reported as applied. These operations now surface the real error.
+- **DNS now targets the same network adapter for reading and changing.** The current-DNS display, the saved snapshot, and the apply/reset/restore actions used slightly different rules to pick the active adapter, so on a PC with several adapters (Wi-Fi + Ethernet + VPN) a change could land on a different adapter than the one shown — breaking the undo. All paths now select the adapter by one shared rule.
+- **Disabling a service now reports failure honestly.** Changing a service's startup type ignored the result of the underlying `sc.exe` call, so a change blocked by Windows (for example on a protected service) was still reported as "set to Disabled". The real exit code is now surfaced as a clear error.
+- **Refreshing a service's status after a change can no longer crash the app.** Reading a service's status right after stopping or disabling it could throw if the handle had just become invalid; that error is now handled and the status shows as "Unknown" instead.
+- **Enabling or disabling a Windows optional feature now reports failure honestly.** A failed feature change could still be reported as successful because the command's error was not propagated; failures now surface correctly.
+- **Privacy toggles that fail to apply no longer look like they succeeded.** Toggles backed by machine-wide (HKLM) settings need administrator rights; without elevation the write was silently swallowed and the toggle appeared applied. The app now reports how many changes need administrator rights and keeps the unapplied ones marked as pending.
+
+## [1.20.30] - 2026-06-17
+
+### Fixed
+- **App Blocker can no longer block a startup-critical Windows process.** The blocker accepted any executable name, so a user could block boot/logon components such as `winlogon.exe` or `lsass.exe` — which would prevent Windows from starting and leave no way to launch the app to undo it. It now refuses a built-in list of boot- and logon-critical executables with a clear message.
+- **Services can no longer disable a boot-critical service behind a generic prompt.** Disabling a service classified as Critical (for example Remote Procedure Call or DCOM Server Process Launcher) could stop Windows from booting or signing in, yet the confirmation read the same as for any safe-to-disable service. Critical services are now refused outright with an explanation of why.
+- **Uninstaller no longer runs unvalidated arguments through `rundll32`/`MsiExec`.** A per-user uninstall entry (which can be written without administrator rights) could point these trusted system binaries at an arbitrary DLL or package, which they would then execute with the app's elevation. The uninstaller now requires the `rundll32` DLL to live under a trusted directory and restricts `MsiExec` to a product-code uninstall.
+- **File Shredder no longer crashes after a successful shred.** Once at least one item was shredded, the cleanup step that removes finished items ran off the UI thread and threw, aborting the operation on its normal success path. The shredding flow now resumes on the UI thread so completed items are removed cleanly.
+
+## [1.20.29] - 2026-06-17
+
+### Fixed
+- **Speed Test no longer reports an inflated upload speed when the server cuts the upload short.** The upload test always credited the full 50 MB payload against the elapsed time, even when the server rejected the request early and only part of the data was sent — producing an unrealistically high number. It now reports a failed measurement if the server rejects the upload, and otherwise measures the bytes actually sent, so the upload speed reflects reality.
+
+## [1.20.28] - 2026-06-17
+
+### Fixed
+- **Dashboard alert checks are more robust.** The "estimated time remaining" hint that appears while a dashboard check is still running updated its on-screen state from a background thread, which could occasionally fail to display or glitch; it now updates on the UI thread like every other dashboard check. Separately, two error paths (a failed dashboard check and a failed quick action) now record the underlying error in the log so failures can be diagnosed instead of vanishing silently. No visible change in normal use.
+
+## [1.20.27] - 2026-06-17
+
+### Fixed
+- **Deep Cleanup now empties the Recycle Bin through the Windows shell instead of deleting its files directly.** The "Recycle Bin (all drives)" category used the same raw file-delete path as ordinary caches, removing the internal `$Recycle.Bin` index/data files and per-account folders directly. That could leave the Recycle Bin in an inconsistent state (ghost or undeletable items in Explorer) until the next sign-in. It now empties the bin via the documented shell API, the same safe method used elsewhere in the app.
+
+## [1.20.26] - 2026-06-16
+
+### Fixed
+- **The About → System Info diagnostics no longer leak system handles.** Building the environment summary (CPU, RAM, GPU, display, and OS lines) queried Windows for hardware details but never released the query result sets, leaking a small COM handle on each refresh. Every query now disposes its results, matching how the rest of the app handles these reads. No change to the information shown.
+
+## [1.20.25] - 2026-06-16
+
+### Fixed
+- **Saving the hosts file now preserves its original permissions.** The atomic save introduced in 1.20.24 replaced the file by moving a freshly written temporary file over it, which left the new file with the folder's default permissions instead of the hosts file's own (more restrictive) access-control settings. Saving now replaces the file in place, keeping its existing permissions and attributes intact.
+
+## [1.20.24] - 2026-06-12
+
+### Fixed
+- **Hosts entries with multiple hostnames per IP are no longer silently lost.** A line like `127.0.0.1 a b c` was read keeping only the first hostname, so editing and saving dropped the rest. Each hostname is now read as its own entry and survives a round trip.
+- **The hosts file is now written atomically.** Saving wrote directly over the file, so a crash mid-write could leave it empty or truncated. It now writes to a temporary file and atomically replaces the target, cleaning up the temp file afterward.
+
+## [1.20.23] - 2026-06-12
+
+### Fixed
+- **No more leaked process handles when opening Explorer / links.** Ten places that launch Explorer ("show in folder"/"open file location"), Event Viewer, the browser, or the updater left the returned process handle undisposed. Each now releases it. The launched program is unaffected; only the orphaned handle is cleaned up. Covers Deep Cleanup, Disk Analyzer, Duplicate Finder, Startup Manager, Logs, About, and the Context Menu refresh.
+
+## [1.20.22] - 2026-06-12
+
+### Fixed
+- **Drive/disk health reads survive systems without the Storage WMI namespace.** Disk Health and System Info could throw an unhandled COM error on older or headless Windows where the `root\Microsoft\Windows\Storage` namespace isn't present; both now handle that case and fall back gracefully (mirrors the earlier Fixed Drives fix).
+- **No leaked process handle when opening a file location.** "Open file location" in Process Manager left the launched Explorer process handle undisposed; it's now released.
+- **Swallowed errors are now diagnosable.** Several silent `catch` blocks now log at Debug level with the full exception (update-file cleanup, Deep Cleanup directory deletion, Windows Update size extraction, and the Dashboard polling loop), so failures leave a trace in the log instead of vanishing.
+
+## [1.20.21] - 2026-06-12
+
+### Changed
+- **Some status/accent colors now follow the theme instead of being hardcoded.** Replaced hardcoded color values that exactly matched a theme color (success green, warning amber, danger red, accent, hover border) with theme references on the Dashboard, Network Repair, Privacy, and Uninstaller tabs. The colors render identically today but will track the theme going forward.
+
+## [1.20.20] - 2026-06-12
+
+### Fixed
+- **Much better screen-reader support across the app.** Many buttons, toggles, drop-downs, search/filter boxes, data grids, and per-row actions had no accessible name, so screen readers announced them generically (or not at all). Added clear, specific accessible names to interactive controls across 21 tabs — including destructive actions (Delete, Shred, Clear History), per-row buttons (now named after the item they act on), and unlabeled inputs. No visual change.
+
+## [1.20.19] - 2026-06-12
+
+### Fixed
+- **Activity history can no longer be corrupted by concurrent updates.** The recent-actions log saved its data outside the lock that protects it, so two actions logged at the same time could clash and produce a "collection modified" error or a truncated file. It now writes a consistent snapshot taken under the lock.
+- **The in-app updater fails gracefully when the download location can't be determined.** Installing an update now checks the downloaded file's folder up front and shows a clear message instead of risking a crash.
+
+## [1.20.18] - 2026-06-12
+
+### Fixed
+- **More resilient reading of battery, memory, and app-list data.** Unexpected values from Windows (battery stats, memory-module details) could throw a conversion error and interrupt a scan; those conversions now fall back safely. The winget output parser also no longer throws when the tool reports columns in an unusual order.
+
+## [1.20.17] - 2026-06-12
+
+### Fixed
+- **Plugged several resource leaks.** The system-tray icon's underlying graphics handle was never released on shutdown; the elevated-relaunch helper left a process handle open; and a memory-module query left a WMI result set undisposed. All are now released properly. Also added handling for a WMI namespace being unavailable when reading drive media/bus details, so that case fails quietly instead of surfacing an error.
+
+## [1.20.16] - 2026-06-12
+
+### Fixed
+- **Starting or stopping a Windows service no longer crashes the app on failure.** If a service couldn't be started or stopped (access denied, a dependency problem, or the service state changing mid-operation), the underlying error escaped unhandled. Those failures are now caught and shown as a clear status message.
+- **Privacy toggles no longer crash on a registry write error.** Applying a privacy toggle only handled permission errors; a registry I/O error or an invalid key/value now logs a warning instead of bringing down the app.
+- **Disabling Xbox Game Bar no longer crashes on a registry I/O error.** The Performance tab's Xbox Game Bar action now handles I/O failures the same way it already handled permission and state errors.
+- **A misbehaving UI subscriber can no longer permanently lock an operation category.** If a property-change notification threw while acquiring an operation lock, the category could stay locked forever (blocking all future disk/network/system operations of that kind). The lock is now rolled back cleanly if that happens.
+
+## [1.20.15] - 2026-06-12
+
+### Fixed
+- **File Shredder can no longer be tricked into destroying a protected system file.** The safety check that blocks shredding inside Windows, System32, and Program Files compared the path you gave it without first following symbolic links — so a link placed in an allowed folder but pointing at a protected system file slipped past the check, and the real file was overwritten. The check now resolves link targets before validating and matches protected folders on an exact directory boundary (so an unrelated folder that merely starts with the same name is no longer falsely blocked). If a file's contents are securely overwritten but the entry can't be removed, the app now reports that clearly instead of surfacing a raw error.
+
+## [1.20.14] - 2026-06-11
+
+### Fixed
+- **No more hidden shutdown errors when closing the app.** Cleanup ran more than once on exit (it is triggered by both the window-close and the application-exit events), which double-released the network charts' underlying graphics resources — an error that was caught and hidden but still occurred on every exit. Cleanup is now guarded so it runs exactly once, and the shared network monitors are stopped rather than disposed twice, so the app shuts down cleanly.
+
+## [1.20.13] - 2026-06-11
+
+### Fixed
+- **The live-output console now matches the app's card styling.** Its container used a one-off border with a smaller corner radius than every other card; it now uses the shared `Card` style (same surface, border, and 10px radius) while keeping its zero inner padding, so the console looks consistent on the App Updates, Cleanup, System Health, and Windows Update tabs.
+
+## [1.20.12] - 2026-06-10
+
+### Fixed
+- **Windows Update list has a real select-all checkbox.** The updates grid's checkbox column used a decorative `✓` header that did nothing and had no accessible name. It is now a working select-all checkbox ("Select all updates") that toggles every row, and it stays in sync with the existing Select all / Deselect all buttons.
+
+## [1.20.11] - 2026-06-10
+
+### Fixed
+- **System Logs severity tiles are now screen-reader friendly and colorblind-safe.** The Critical / Errors / Warnings / Info count tiles conveyed their value only through color and an unlabeled number. Each tile now exposes an accessible name with its count (e.g. "Critical events: 3"), and the Critical and Errors tiles — both previously red and indistinguishable to colorblind users — are now told apart by a leading glyph (▲ vs ●) and weight, not hue alone.
+
+## [1.20.10] - 2026-06-10
+
+### Fixed
+- **Console output toolbar is now consistent and screen-reader friendly.** The Clear and Copy buttons on the live-output console (shown on App Updates, Cleanup, System Health, and Windows Update) used the implicit default button style; they now use the standard `SecondaryButton` style like the rest of the app. The output list also gained an accessible name ("Live output").
+
+## [1.20.9] - 2026-06-10
+
+### Fixed
+- **System Logs time-range chips now show which range is active and are keyboard-navigable.** The 1h / 24h / 7d / 30d / All chips were unlabeled buttons with no selected state, so you couldn't tell which range was applied. They are now a proper radio-button group (matching the Services tab filter chips): the active range is highlighted, the group is arrow-key navigable, and each chip is named for screen readers.
+
+## [1.20.8] - 2026-06-10
+
+### Fixed
+- **Theme presets are now keyboard-accessible.** The preset cards in the appearance popup were mouse-only — not reachable by Tab, not activatable from the keyboard, and unnamed to screen readers. They are now focusable, activate with Enter or Space, and announce their preset name. The custom-color hex inputs (accent, background, surface, text) also gained accessible names.
+
+## [1.20.7] - 2026-06-10
+
+### Fixed
+- **Search and filter boxes now have accessible names.** The category/filter/search inputs on Apps (Bulk Installer), Uninstaller, Process Manager, Services, and Windows Features had no `AutomationProperties.Name`, so screen readers announced them as anonymous edit fields. Each now states what it filters (e.g. "Filter installed apps", "Search winget packages", "Filter Windows features").
+
+## [1.20.6] - 2026-06-10
+
+### Fixed
+- **Screen readers now announce row actions and the App Blocker input by name.** Several icon-only and unlabeled controls had no accessible name, so assistive technology announced them generically (e.g. "X button"). Added `AutomationProperties.Name` to the Process Manager Kill/Open buttons (with the process name), the Ping remove-target button (with the target name), the File Shredder row Remove button (with the file name), and the App Blocker executable-name input.
+
+## [1.20.5] - 2026-06-08
+
+### Added
+- **Undo a DNS change.** Applying a DNS preset now snapshots the servers in effect beforehand, and a new "Undo" button on the DNS & Hosts tab restores that exact previous configuration (re-applying the prior static servers, or resetting to DHCP if that was the prior state). Previously the only way back was "Reset to DHCP", which silently discarded any manually-configured DNS.
+
+## [1.20.4] - 2026-06-08
+
+### Fixed
+- **Ping monitor no longer leaks its CancellationTokenSource.** When `Stop()` was called while the ping loop was still winding down (the 1.5s wait timed out), the CTS reference was dropped and never disposed. It is now disposed once the loop actually finishes — immediately if already complete, otherwise via a continuation.
+- **System Logs no longer block the UI thread while reading the Event Log.** `EventLogService.ReadAsync` ran the blocking `EventLogReader.ReadEvent()` COM call on the caller's (UI) thread, freezing the app while large logs were enumerated. Each read now runs on the thread pool via `Task.Run`.
+
+### Changed
+- **Dashboard GPU name now works for AMD/Intel, not just NVIDIA.** When no NVIDIA GPU is present, the Dashboard falls back to `Win32_VideoController` (WMI) to show the adapter name. Live usage % remains NVIDIA-only (it requires vendor-specific APIs).
+
+## [1.20.3] - 2026-06-08
+
+### Fixed
+- **Drive enumeration no longer crashes on missing WMI properties.** `FixedDriveService` read `MediaType`/`BusType` with `Convert.ToUInt32(value ?? 0u)`, but WMI returns `DBNull.Value` (not null) for absent properties, so `Convert.ToUInt32(DBNull.Value)` threw and aborted the whole scan on some hardware. Reads now go through a `ToUInt32Safe` helper that treats null and `DBNull` as 0.
+- **Uninstaller trusted-directory check no longer accepts sibling folders.** `IsUnderTrustedDirectory` used a bare `StartsWith`, so `C:\Program Files Evil\…` passed the `C:\Program Files` check. It now compares on a normalized directory boundary (trailing separator) so only true sub-paths of a trusted directory are accepted.
+
+## [1.20.2] - 2026-06-08
+
+### Fixed
+- **Restore point creation no longer reports false success.** `CreateRestorePointAsync` returned `true` whenever the PowerShell call didn't throw, but `Checkpoint-Computer` fails *non-terminating* in common cases (notably the once-per-24h rate limit), so failures were reported as success — undermining the "everything is reversible" guarantee. It now forces the error to terminate and only returns `true` when an explicit success sentinel is emitted.
+- **In-app updater can now find its download asset.** The release-asset matcher looked for a fixed `SysManager.exe`, but releases publish `SysManager-v<version>.exe`, so `AssetUrl`/`AssetSize` were always null. Replaced with `IsMainExeAsset`, which matches the versioned executable and excludes the `.sha256` companion.
+- **Windows Update scan no longer leaks COM objects on failure.** `WindowsUpdateService.ScanAsync` released its COM objects only on the success path, so a cancellation or mapping error mid-scan leaked them. The releases now run in a `finally` block.
+
+## [1.20.1] - 2026-06-08
+
+### Fixed
+- **App Blocker no longer clobbers a pre-existing debugger.** `BlockApp` wrote its IFEO `Debugger` value unconditionally, overwriting any value already present — which could break a legitimately-debugged application and was unrecoverable (Unblock only removes SysManager's own value). It now refuses to block an executable that already has an external `Debugger` set, leaving the existing configuration intact.
+- **Privacy changes now require confirmation.** Applying pending privacy toggles to the registry now prompts with `DialogService.Confirm` first, stating how many changes will be written and how to revert. Declining keeps the changes pending and writes nothing.
+
+## [1.20.0] - 2026-06-08
+
+### Added
+- **Restore original hosts file.** A new "Restore original" button on the DNS & Hosts tab reverts the system hosts file to the pristine backup taken before SysManager first modified it.
+
+### Fixed
+- **Hosts file backup no longer destroys the pristine original.** `SaveHosts` previously copied the current hosts file over `hosts.bak` on **every** save with `overwrite: true`, so after the first save the backup already held SysManager's own output — the real original was lost and restore was impossible. The backup is now written only once (when none exists), preserving the true pre-SysManager file.
+- **DNS and hosts changes now require confirmation.** Applying a DNS preset and overwriting the system hosts file each prompt with `DialogService.Confirm` first, stating exactly what will change and how to revert. Declining makes no system change.
+
+### Changed
+- `HostsFileService` gained a path-injection constructor (used only for testing) and `HasBackup` / `RestoreBackup` members backing the new restore flow.
+
+## [1.19.4] - 2026-06-08
+
+### Fixed
+- **Destructive cleanup actions now require confirmation.** Three deletion paths ran immediately with no prompt: Deep Cleanup (`CleanAsync`), Temp Cleanup, and Empty Recycle Bin. Each now shows a `DialogService.Confirm` dialog first — Deep Cleanup states the file count and total size and warns the files bypass the Recycle Bin. Declining cancels with no changes. Adds regression tests covering both the decline (nothing deleted) and confirm (files deleted) paths.
+
+## [1.19.3] - 2026-06-08
+
+### Fixed
+- **Deep Cleanup no longer follows junctions / symbolic links (data-loss fix).** The cleanup traversal descended into reparse points, so a junction inside a cache folder could lead `File.Delete` to remove files **outside** the target tree — for example real user data behind a junction. Traversal now detects reparse points (`FileAttributes.ReparsePoint`) and skips them entirely, never entering or deleting through a link.
+- **Dashboard alerts no longer always show "unavailable".** The App Updates, Event Log, and Pending Reboot scanners each had a free code block after their `catch` that ran unconditionally and overwrote the real scan result with an "unavailable / green" status. The Dashboard therefore reported false-OK for these three checks regardless of the actual system state. The decision logic is now extracted into pure, unit-tested methods and the overwrite is gone, so real results surface.
+
+## [1.19.2] - 2026-06-08
+
+### Fixed
+- **UI test harness could never locate the app executable.** `AppFixture` hardcoded a `net8.0-windows` output path while the project targets `net10.0-windows`, so `FindExecutable()` always threw `FileNotFoundException` when running the UI automation tests locally. The path is now resolved dynamically from the `net*-windows` build folder, so it survives future framework bumps.
+
+## [1.19.1] - 2026-06-05
+
+### Fixed
+- **Code-scanning cleanup (mechanical, no behavior change).** Resolved a batch of low-risk CodeQL quality alerts in hand-written code:
+  - Empty `catch` blocks now log at Debug level (`ContextMenuService` registry-write fallbacks and command-path parse, `App.OnExit` service-provider disposal) or carry an explanatory comment where the caught exception is expected (`DnsHostsViewModel` cancellation on teardown).
+  - `Path.Combine` → `Path.Join` in `ActivityLogService` to avoid silently dropping earlier path segments.
+  - Object `==`/`!=` comparisons made explicit with `ReferenceEquals` where reference identity is intended (`MainWindowViewModel` tab activation, `TemperatureService` core-vs-package sensor check).
+  - Implicit `foreach` filtering/mapping replaced with explicit LINQ (`Where`/`Select`/`FirstOrDefault`) in `TemperatureService`, `FileShredderService`, `HostsFileService`, and `ContextMenuViewModel`.
+  - Removed useless local assignments in `DashboardViewModel` (an unused `Stopwatch`, an unread temp-scan size) while preserving the scans' side effects.
+
+## [1.19.0] - 2026-06-05
+
+### Changed
+- **Uniform outer margins across 13 views.** BatteryHealth, BulkInstaller, ContextMenu, DiskAnalyzer, Drivers, DuplicateFile, Performance, Privacy, ProcessManager, Services, Startup, Uninstaller, WindowsFeatures all migrated from `Margin="32,24"` to the canonical `Margin="28,24,28,16"` already used by Dashboard and AppAlerts. Layout is now consistent across the whole nav.
+- **Page background — theme-aware.** 15 views were defining a hardcoded `LinearGradientBrush PageBg` (`#070A0F`/`#0B1220`/`#090D16`) and using `{StaticResource PageBg}` for their root `Grid.Background`. Replaced with `{DynamicResource Surface0}`. The gradient resource definitions are gone, the views are smaller, and a future light-theme switch will work without per-view edits.
+- **Admin elevation banner colors — theme-aware.** Replaced 4 hardcoded amber hex values (`#1AFBBF24`, `#40FBBF24`, `#FBBF24`, `#FCD34D`) used by elevation banners and warning pills across 17 views with new theme brushes: `WarningBgSubtle`, `WarningBg`, `WarningStripe`, `WarningText`. Defined once in `App.xaml`, used everywhere.
+
+## [1.18.3] - 2026-06-03
+
+### Fixed
+- **Async-safety follow-up.** Dropped the remaining `async void` pipe-listener path and the sync-over-async wrappers flagged during review, completing the threading cleanup started in 1.18.2.
+
+## [1.18.2] - 2026-06-03
+
+### Fixed
+- **Pipe listener no longer fire-and-forgets via `async void`.** `App.StartPipeListener` was an async-void method, meaning any exception escaping the loop would crash the process via the AppDomain handler. Renamed to `StartPipeListenerAsync` returning `Task`; `OnStartup` calls it as `_ = StartPipeListenerAsync()` so a stray exception flows through `TaskScheduler.UnobservedTaskException` (logged) instead of terminating the app.
+- **StartupService — removed sync wrapper over async.** `SetEnabled` (sync) was a thin wrapper around `SetEnabledAsync` using `.GetAwaiter().GetResult()`. The wrapper is gone; tests now call `SetEnabledAsync` directly via xUnit `Task` test methods.
+- **Schtasks stderr read** — replaced `stderrTask.Wait(timeout) ? .GetAwaiter().GetResult() : ""` with `await stderrTask.WaitAsync(timeout)` so the read is fully async with a clean timeout fallback.
+- **Privacy Toggles no longer write to the registry on every click.** Toggling a switch now updates local state only; the user must press **Apply** to write pending changes. A live counter shows how many changes are pending, and **Discard** reverts them without touching the registry. Prevents accidental system changes when scrolling through the toggle list.
+- **Dashboard no longer freezes on first load.** Static system info (CPU, OS, RAM modules) is now loaded asynchronously instead of blocking the UI thread on a synchronous WMI capture. The Dashboard tab is responsive immediately on startup.
+- **DNS / Hosts tab loads asynchronously.** Reading the hosts file is now async (`File.ReadAllLinesAsync`); Refresh no longer freezes the UI on slow disks.
+- **Icon cache eviction is now true FIFO.** The icon cache previously evicted random entries because `ConcurrentDictionary.Keys` has no insertion-order guarantee. Frequently-used icons could be dropped while stale ones survived. The cache now tracks insertion order via a queue and evicts the oldest entries first when the size limit is reached.
+- **SpeedTest output read** — replaced `Task.Result` access after `Task.WhenAll` with proper `await` to remove the deadlock-prone pattern (the awaited tasks were already complete, but the style is now safe under all call paths).
+- **Silent exception swallowing** — empty `catch { }` blocks now log at Debug level so failures are diagnosable: ThemePopup custom-color parser, TemperatureService LibreHardwareMonitor close, WindowsUpdateService COM/RuntimeBinder catches in `ExtractKbIds` and `ClassifyCategory`.
+- **Deep Cleanup** — file/directory cleanup errors are now logged in addition to being added to the per-run error list, so unexpected I/O issues surface in the SysManager log.
+- **Admin relaunch** — `RelaunchAsAdmin` now distinguishes the user's UAC decline (Win32 error 1223 → Information) from real Win32 failures (Warning) and logs `InvalidOperationException` instead of swallowing it silently.
+- **`SHGetFileInfo` P/Invoke** — added `SetLastError = true` so callers can inspect the Win32 error code on failure.
+
+### Changed
+- **PrivacyView toolbar** — the **Apply All** button is replaced by **Apply** (writes only pending changes) and **Discard** (reverts to last-applied state). Both are disabled when no changes are pending. The Apply button uses the primary style to highlight the action.
+- **PerformanceService.TakeSnapshotAsync** XML doc now warns callers that the method must run before any state-modifying call; the recommended lazy-initialization pattern is documented inline.
+- **PerformanceService.CreateRestorePointAsync** comment reworded — the previous `// BUG-003:` marker was a design note, not an open bug; replaced with an explanation of why PowerShell `AddParameter` cannot be used here.
+- **App.xaml.cs unhandled-exception dialog** — added inline note explaining why `MessageBox.Show` is used instead of `DialogService` (the dispatcher exception may originate from DialogService itself).
+- **`.gitignore`** — added entries for local developer notes (`.session-notes/`, `notes-local.md`, `scratch.md`) so scratch files can never be tracked accidentally.
+
+## [1.18.1] - 2026-06-03
+
+### Fixed
+- **Critical and high-priority audit fixes (P0 + P1).** Resolved the top-severity findings from the code audit ahead of the 1.18 line — crash-safety, resource, and correctness fixes across the service layer.
+
+## [1.18.0] - 2026-06-03
+
+### Fixed
+- **Windows Update install actually works** — replaced PSWindowsUpdate's `Install-WindowsUpdate` with direct calls to the Windows Update Agent COM API (`Microsoft.Update.Session`). PSWindowsUpdate filters out optional driver updates client-side even when the COM API can install them; the new code installs everything WUA reports as available, including drivers, firmware, Defender Definitions, cumulative updates, and feature upgrades.
+- **Honest per-update progress** — live console now streams real per-update events (Connecting → Downloading → Installing → ✓ Installed) instead of a 16-times-repeated PSWindowsUpdate pre/post search noise that resulted in "Installed 0".
+- **Per-row Status reflects reality** — each row's Status column is updated as the install progresses (`Pending…` → `Downloading…` → `Installing…` → `Installed` / `Installed (reboot required)` / `Failed (download)` / `Failed (install code N)` / `Not applied`).
+- **Status column wider with tooltip** — fits longer messages like "Installed (reboot required)" without truncation; full text always visible on hover.
+- **Live output panel no longer auto-resizes** — fixed height of 240px so the DataGrid above keeps its space when many log lines arrive.
+
+### Changed
+- **Removed live output from Ping and Traceroute** — those tabs already display their data graphically (latency chart, hops grid). The console panel was redundant and stole vertical space.
+- **Single-header live output panel** — removed the redundant "Live output" Card+Expander wrapper; the ConsoleView toolbar (Live output / Clear / Copy / Auto-scroll) now sits directly on the panel border, matching CleanupView and AppUpdatesView.
+- **KB column header tooltip** — explains "KB = Microsoft Knowledge Base article ID" since not all updates have one (drivers, firmware, Defender).
+
+### Added
+- **WindowsUpdateService** — new service wrapping `Microsoft.Update.Session` COM API directly. Supports scan (`IsInstalled=0`), download, EULA acceptance, install, and reboot detection. Exposes a `Log` event for live console streaming.
+- **Title-based category classifier** — Defender / Driver / Cumulative / Security / Servicing / .NET / Feature upgrade / Update, with COM `Categories` collection lookup as the primary signal and title heuristics as fallback. Unit-tested.
+
+## [1.17.4] - 2026-06-03
+
+### Fixed
+- **Windows Update install never applied updates** — install command sent KB numbers prefixed with `KB` (e.g. `KB5034441`) to PSWindowsUpdate's `-KBArticleID` parameter, which expects bare digits; the cmdlet matched zero updates and exited silently. Updates without a KB (Defender Definitions, drivers) and updates with multiple KBs were also excluded by the selection filter. The status bar reported a fabricated "Installed N update(s)" message based on the selection count rather than the cmdlet's actual result.
+- **Honest install reporting** — Install-WindowsUpdate output is now captured and parsed; the status bar shows real counts (`Installed X/Y. Failed: Z. Not applied: W.`) and each row's Status column reflects per-update outcome (`Installed`, `Failed`, `Not applied`).
+
+### Changed
+- **Unified update list** — "List updates" now returns Standard, Feature upgrades, and Hidden updates in a single grouped table; the separate "Feature upgrades" button has been removed. Category column distinguishes Security, Cumulative, Defender, Driver, Servicing, .NET, Feature upgrade, and Hidden entries.
+- **Title-based install pipeline** — selected updates are matched against the live PSWindowsUpdate feed by Title rather than KB, so updates without a KB (Defender, drivers) and updates with multiple KBs install correctly.
+
+## [1.17.3] - 2026-05-29
+
+### Fixed
+- **Performance** — NetworkSharedState TracerouteHops converted to BulkObservableCollection with ReplaceWith() (eliminates per-hop UI notifications during route updates).
+- **Performance** — ServicesViewModel safety level counts now computed in a single pass instead of 3 separate LINQ queries.
+- **Consistency** — DnsHostsView removed stale `HorizontalGridLinesBrush` property (no visual impact, code cleanliness).
+- **Consistency** — AppBlockerView DataGrid BorderThickness set to 0 matching all other views.
+
+## [1.17.2] - 2026-05-29
+
+### Fixed
+- **Memory leaks** — AboutViewModel now properly disposes ManagementObject instances in all 5 WMI foreach loops (CPU, RAM, GPU, Display, OS detection).
+- **Silent failures** — ThemeService Save/Load empty catch blocks now log errors via Serilog instead of swallowing silently.
+- **Dashboard error handling** — replaced 4 bare `catch (Exception)` in alert scanners with logged exceptions for diagnostics.
+- **UI flicker** — BulkInstallerViewModel.FilteredApps converted from ObservableCollection to BulkObservableCollection with ReplaceWith().
+- **Visual consistency** — ShortcutCleanerView DataGrid now has `Background="Transparent"` and `BorderThickness="0"` matching all other views.
+
+## [1.17.1] - 2026-05-29
+
+### Fixed
+- **Documentation** — ARCHITECTURE.md updated with new TemperatureService, ActivityLogService, and rewritten DashboardViewModel description to reflect v1.17.0 redesign.
+
+## [1.17.0] - 2026-05-29
+
+### Added
+- **Dashboard redesign** — complete overhaul of the landing page:
+  - **Real-time vitals** — CPU%, RAM%, GPU% with 300ms polling (smoother than Task Manager), live indicator dots, detailed hardware info (cores/threads, DDR speed, VRAM usage)
+  - **Temperatures** — real-time sensor readings via LibreHardwareMonitor (admin) or NvAPIWrapper (non-admin NVIDIA). Shows CPU Package, GPU Core, GPU Hot Spot, all storage drives. Color-coded (green/blue/yellow/red). "Run as admin for all sensors" button when elevated data unavailable.
+  - **Storage overview** — per-drive usage bars with color coding (<50% green, 50-75% blue, 75-90% yellow, >90% red)
+  - **System Alerts** — auto-scans at boot with loading spinners: SMART health, app updates count, memory errors (30d), Event Log critical events (7d), pending reboots. Each with ETA if scan takes >5s.
+  - **Quick Actions** — Run Quick Cleanup, Update All Apps, Check Windows Updates, Run Speed Test. Each runs inline with progress bar, result summary, and "Go to [tab] for more details" navigation button. Buttons unlock after action completes.
+  - **Recent Activity** — last 5 user actions with timestamps (persisted to JSON)
+  - **Health Score** hero card with recommendations (existing, repositioned)
+  - **IsActive pattern** — polling pauses when user leaves Dashboard tab (saves CPU)
+- **TemperatureService** — new service aggregating temps from LibreHardwareMonitor + NvAPIWrapper + SMART
+- **ActivityLogService** — new service persisting user action history to `%LOCALAPPDATA%\SysManager\activity.json`
+- **NvAPIWrapper.Net** — new dependency for NVIDIA GPU temps without admin
+- **LibreHardwareMonitorLib** — new dependency for full sensor access with admin
+
+## [1.16.3] - 2026-05-29
+
+### Fixed
+- **Code quality** — ContextMenuService uses `[GeneratedRegex]` for compile-time regex (performance + AOT-ready).
+- **Naming standardization** — all admin relaunch methods now consistently named `RelaunchAsAdmin` across all 12 ViewModels (was mixed: `RelaunchElevated`, `RequestElevation`).
+- **Naming standardization** — filter properties unified to `FilterText` everywhere (LogsViewModel was `SearchText`, ServicesViewModel was `Filter`).
+- **ConsoleViewModel** — removed dead optimization branch (clear-and-rebuild path was unreachable).
+- **Missing toasts** — added completion notifications to System Health scan and App Alerts "Show Installed".
+
+## [1.16.2] - 2026-05-28
+
+### Fixed
+- **UI uniformity** — AppAlertsView fully reworked: proper Card wrappers, styled buttons (Primary/Secondary/Danger), removed DataGrid gridlines, standardized header using Display style, consistent column styling.
+- **DashboardView consistency** — standardized margins (28px), replaced inline admin button template with app-wide AdminButton/elevation banner pattern, added proper button styles to all actions.
+- **Performance** — replaced `ObservableCollection` with `BulkObservableCollection` in UninstallerViewModel, WindowsFeaturesViewModel, WindowsUpdateViewModel, and LogsViewModel (eliminates UI flicker from Clear+Add loops).
+
+## [1.16.1] - 2026-05-28
+
+### Fixed
+- **Security hardening** — version bump for security and performance fixes.
+
+## [1.16.0] - 2026-05-28
+
+### Added
+- **Context Menu redesign** — complete overhaul of the Context Menu Manager tab:
+  - **Presets:** Win10 Default (classic full menu), Win11 Default (modern compact), Custom
+    (manual toggles). Selecting Win10/Win11 resets to clean default by disabling all
+    third-party entries (Git, NVIDIA, etc.) — user can re-enable individually.
+  - **Win10/Win11 style toggle** — switch between classic full context menu and modern
+    Win11 "Show more options" via registry. Automatically restarts Explorer.
+  - **Visual preview on hover** — real screenshots showing exactly what each menu style
+    looks like (default + custom + "Show more options" expanded).
+  - **Entry explanations** — human-readable descriptions for ~40 common entries shown
+    inline (e.g. "Opens a Git Bash terminal in the current directory").
+  - **"Applies to" column** — clearly shows whether an entry affects Files, Folders,
+    Directory Background, or Desktop.
+  - **HKCU fallback** — system-protected entries (TrustedInstaller) can now be toggled
+    via HKCU registry override instead of failing with "access denied".
+
+### Fixed
+- **Crash on admin relaunch** — `CancellationTokenSource disposed` error no longer shown
+  when restarting the app with elevated privileges.
+- **Admin elevation banner** — Context Menu tab now shows the standard admin banner
+  (matching all other tabs) with "Run as administrator" button.
+
+## [1.15.0] - 2026-05-27
+
+### Added
+- **ETA on long operations** — estimated time remaining now shown on:
+  SFC scan, DISM restore, Bulk Installer, Uninstaller, and App Updates.
+  Uses linear extrapolation from elapsed time and current progress percentage.
+
+## [1.14.0] - 2026-05-27
+
+### Added
+- **Sidebar smooth animation** — expand/collapse groups now slide with a 150ms animation
+  instead of instant jump.
+- **Chevron indicator** — rotating arrow on sidebar group headers showing expand/collapse state.
+- **Full-width hitbox** — entire sidebar group header row is clickable, not just the text.
+
+### Changed
+- **Theme button relocated** — moved from content area top-right (caused overlaps) to sidebar
+  footer bottom-right, next to version info. Always accessible, no overlapping.
+
+## [1.13.3] - 2026-05-27
+
+### Fixed
+- **Theme compliance** — replaced hardcoded hex colors with DynamicResource tokens so all
+  UI elements follow the active theme. ConsoleView, nav hover, DataGrid hover, and semantic
+  status colors (Success, Warning, Danger, Info) now update live on theme switch.
+- **AccentSoft opacity** — unified hover/selected background opacity to 9.4% across all
+  views (was inconsistent between 6%–9.4%).
+
+## [1.13.2] - 2026-05-27
+
+### Fixed
+- **DataGrid column resize** — all 19 DataGrids across 16 views now have `MinWidth` on every
+  column preventing content from being compressed to invisible on resize.
+- **Startup Manager "Open" button clipped** — column widened from 60→80px.
+- **Toggle switch clipping** — toggle columns (Startup, Context Menu, Windows Features) widened
+  to 62px to prevent pill shape from being cut off.
+- **Action columns no longer resizable** — buttons/toggles/checkboxes columns locked with
+  `CanUserResize="False"` so users cannot accidentally shrink them.
+
+## [1.13.1] - 2026-05-27
+
+### Fixed
+- **Theme performance** — freeze all runtime-created brushes for reduced GC pressure
+  and improved WPF rendering throughput.
+- **Theme popup duplicate handlers** — prevent event subscriptions from stacking on
+  repeated popup opens, which caused redundant theme re-applies.
+
+## [1.13.0] - 2026-05-27
+
+### Added
+- **Theme customization** — persistent appearance settings with Dark/Light/Custom modes.
+  Choose from 12 curated presets (6 dark, 6 light) or fully customize accent, background,
+  surface, and text colors. Settings saved between sessions.
+- **Theme button** — palette icon in top-right corner, accessible from every page.
+- **Background shade slider** — fine-tune lightness/darkness within any preset.
+- **Auto companion preset** — switching Dark↔Light automatically selects the matching
+  color family (e.g. Midnight Indigo ↔ Clean Indigo).
+
+### Changed
+- All color resources converted from `StaticResource` to `DynamicResource` for live
+  theme switching without restart.
+
+## [1.12.1] - 2026-05-27
+
+### Fixed
+- **Startup crash** — duplicate implicit CheckBox style in App.xaml caused
+  `XamlParseException` ("Item has already been added") preventing the app from launching.
+
+## [1.12.0] - 2026-05-26
+
+### Added
+- **SpeedTest server selection** — dropdown to choose Ookla test server (Auto/Bucharest/
+  London/Frankfurt/Amsterdam/Paris/New York) instead of always using nearest.
+
+## [1.11.0] - 2026-05-26
+
+### Added
+- **Bulk Installer "Installed" badge** — apps already on the system show a green "Installed"
+  badge. Detection via `winget list` at startup.
+- **SpeedTest explanation** — info banner explaining Ookla vs HTTP test differences.
+- **Network Repair explanations** — detailed descriptions for each repair action
+  (Flush DNS, Reset Winsock, Reset TCP/IP).
+
+### Fixed
+- **App update failure messages** — more helpful explanations when downloads fail
+  (mentions network issues, firewall, retry suggestions).
+
+## [1.10.3] - 2026-05-26
+
+### Fixed
+- **DashboardView** — replaced 30+ hardcoded hex colors with StaticResource tokens
+  (Surface1, Surface2, Border1, TextPrimary, TextSecondary, Info).
+- **AppBlockerView** — full structural modernization (Display header, Card wrappers,
+  button styles, DataGrid accessibility, Background, margins).
+- **DnsHostsView** — DataGrid grid-lines removed, accessibility name added, text token.
+- **ObservableCollection → BulkObservableCollection** — AppAlerts, AppBlocker,
+  ShortcutCleaner now use single-notification ReplaceWith() instead of N Add() events.
+- **Missing toast notifications** — added on Drivers, Services, ShortcutCleaner,
+  DeepCleanup (3 operations), NetworkRepair.
+- **UninstallerView** — hardcoded `#6366F1` replaced with `{StaticResource Accent}`.
+
+## [1.10.2] - 2026-05-26
+
+### Added
+- **Process Manager real-time refresh** — 1-second auto-refresh timer matches Task Manager
+  update speed. CPU measurement window reduced to 100ms for faster snapshots.
+- **SFC progress bar** — parses stdout for completion percentage, shows real progress.
+- **DISM progress bar** — parses stdout for percentage (handles decimal formats like 62.3%).
+- **Ping live output** — ConsoleView showing real-time replies per target (time, timeout).
+- **Traceroute live output** — ConsoleView with hop-by-hop results and explanations
+  (gateway detection, ISP backbone, filtered nodes, destination reached).
+
+## [1.10.1] - 2026-05-26
+
+### Fixed
+- **UI uniformity audit** — replaced all remaining CheckBoxes with purple ToggleSwitch on:
+  Performance (5 toggles), Logs (5 severity filters), Ping targets, Process Manager,
+  Deep Cleanup categories.
+- **Hover consistency** — all interactive elements now use `#186366F1` purple tint.
+  Fixed: LogsView, DiskAnalyzer, NetworkRepair (3 cards), DuplicateFile (added missing hover).
+- **Dashboard** — replaced green Tune-Up button with PrimaryButton (purple), green borders
+  with Accent.
+- **Ping targets** — green tint background replaced with purple.
+- **Hardcoded colors → StaticResource** — ~30 instances replaced across 8 views
+  (Danger, Success, Warning, Info, Accent tokens).
+
+## [1.10.0] - 2026-05-26
+
+### Added
+- **Safety ratings on Services** — each service shows Safe/Caution/Critical badge with
+  description tooltip. Filter chips in toolbar to show only safe-to-disable services.
+- **Safety ratings on Windows Features** — same badge system as Services.
+- **Curated safety database** — 50+ services and 20+ features with researched safety
+  levels and human-readable explanations.
+- **Startup Manager hide system** — toggle to filter out Windows/Microsoft system entries.
+- **Filter chip styles** — reusable green/amber/red radio pill components.
+
+## [1.9.1] - 2026-05-26
+
+### Fixed
+- **Startup Manager columns** — reduced fixed widths to prevent last column overflow.
+- **Startup Manager icons** — use extracted executable path for more accurate icon resolution.
+- **Windows Update live output** — increased MinHeight/MaxHeight for better visibility.
+
+## [1.9.0] - 2026-05-26
+
+### Added
+- **Purple toggle switch** — global ToggleButton component replacing all CheckBoxes and
+  enable/disable buttons. Consistent on/off/locked states across Startup Manager, Privacy,
+  Windows Features, and Context Menu tabs.
+- **Glass toast notifications** — bottom-right overlay appears on operation completion
+  (scan, install, cleanup, shred, etc). Auto-dismisses after 5 seconds.
+- **Inline status bar** — progress state transitions visually from purple (busy) to green (done).
+
+### Changed
+- **Startup Manager** — toggle column uses purple ToggleSwitch instead of checkbox.
+- **Privacy Toggles** — scaled checkbox replaced with ToggleSwitch.
+- **Windows Features** — Enable/Disable button replaced with ToggleSwitch.
+- **Context Menu** — checkbox replaced with ToggleSwitch.
+
+## [1.8.0] - 2026-05-26
+
+### Added
+- **Dark title bar** — forced immersive dark mode via DWM API, no more white chrome.
+- **SSD warning on File Shredder** — info banner explaining wear-leveling limitations.
+- **Download button in updater** — users can now click Download when an update is available.
+- **Windows Features status column** — shows Enabled/Disabled on initial scan.
+
+### Fixed
+- **ProgressBar accent color** — all progress bars now use purple theme globally.
+- **RadioButton/CheckBox accent** — power plan selector and all checkboxes match theme.
+- **Bulk installer hover** — app rows now highlight with visible purple tint on mouseover.
+- **"Install selected" on History tab** — buttons hidden when viewing update history.
+- **Startup Manager refresh** — fixed cross-thread collection update crash.
+- **Startup Manager open folder** — robust path extraction for apps with arguments (lghub etc).
+- **DNS detection** — skips virtual adapters, iterates all active until DNS found.
+- **Release history notifications** — single UI update instead of N individual events.
+
+### Changed
+- **Complete UI redesign** — glass card components, golden admin system, modern severity
+  badges, unified accent color (#6366F1) throughout all views.
+
+## [1.7.20] - 2026-05-25
+
+### Fixed
+- **Silent test runs** — AdminHelper.RelaunchAsAdmin, AboutViewModel.OpenUrl, and
+  DialogService.Confirm now skip execution in test context, preventing UAC prompts
+  and browser tabs during `dotnet test`. All 2281 tests pass silently.
+
+## [1.7.19] - 2026-05-25
+
+### Fixed
+- **Task.Delay in WindowsUpdateViewModel** — replaced remaining `Task.Delay(1)`
+  with `Task.Yield()` for consistent async startup pattern.
+
+## [1.7.18] - 2026-05-25
+
+### Fixed
+- **Atomic update downloads** — UpdateService temp file + SHA-256 verification +
+  atomic rename (carried forward from 1.7.17 fix scope).
+- **ObservableCollection mutation** — build full list before clearing collection.
+- **DeepCleanup skipped-file counts** — track and surface IOException/access errors.
+- **Navigation refactor** — data-driven BuildNavGroups() with Group()/Item() helpers.
+
+## [1.7.17] - 2026-05-25
+
+### Fixed
+- **Task.Delay anti-patterns** — replaced `Task.Delay(1000)` and `Task.Delay(250)` with
+  `Task.Yield()` in AboutViewModel and WindowsUpdateViewModel startup paths.
+- **UpdateService atomic download** — downloads now write to a `.tmp` file first, compute
+  SHA-256 on the temp file, then atomically `File.Move` to the final target. Prevents
+  half-written binaries from being used after interrupted downloads.
+- **ObservableCollection mutation** — AboutViewModel `LoadHistoryAsync()` now builds the
+  full list with LINQ `.Select().ToList()` before clearing/adding to the collection,
+  separating data construction from UI mutation.
+
+### Added
+- **DeepCleanup skipped-file counts** — scan now tracks files that threw IOException,
+  UnauthorizedAccessException, or SecurityException and reports `SkippedCount` in the
+  `CleanupCategory` model. CountDisplay shows "N files - M skipped" when applicable.
+
+### Changed
+- **InitNavigation refactored to data-driven** — sidebar tree construction replaced with
+  `BuildNavGroups()` returning a `NavGroup[]` via `Group()` and `Item()` helper methods.
+  Subtitle and Tooltip are derived from child labels.
+- **Version** aligned to 1.7.17.
+
+## [1.7.16] - 2026-05-22
+
+### Fixed
+- **Tray icon creation is now forced**, ensuring the system-tray icon appears even when the platform delays its initial creation.
+
+### Changed
+- **Upgraded H.NotifyIcon to 2.3.0** for more reliable tray-icon handling.
+
+## [1.7.15] - 2026-05-22
+
+### Fixed
+- **Tray icon reliability** — follow-up adjustments to ensure the system-tray icon initializes correctly during startup.
+
+## [1.7.14] - 2026-05-22
+
+### Added
+- **Real app icons in Bulk Installer** — app icons are fetched via the Google Favicon service and cached locally, so the catalog shows recognizable icons instead of placeholders.
+
+### Fixed
+- **Tray icon always visible** — falls back to a system icon when an app icon fails to load, so the tray icon is never missing.
+
+## [1.7.13] - 2026-05-22
+
+### Fixed
+- **Bulk Installer icons** — real application icons (Chrome, Firefox, Steam, etc.)
+  downloaded via Google Favicon API with local cache and offline fallback.
+- **Elevation banners** — App Updates, Uninstaller, Bulk Installer now uniform.
+  Services banner moved above toolbar. All 13 admin pages consistent.
+- **File Shredder** — fixed white page (transparent DataGrid background).
+- **Column resize** — CanUserResizeColumns on all remaining DataGrids.
+- **Tray icon** — shows real app icon from exe (not generic).
+
+## [1.7.12] - 2026-05-22
+
+### Fixed
+- **Tray icon loads from the executable**, which is reliable under single-file publishing, with a pack-URI fallback if the embedded icon cannot be read.
+
+## [1.7.11] - 2026-05-22
+
+### Fixed
+- **Tray icon visibility** is now set explicitly, so the system-tray icon shows reliably.
+
+## [1.7.10] - 2026-05-22
+
+### Fixed
+- **Uniform elevation banners** across App Updates, Uninstaller, and Bulk Installer, so every tab presents the admin-elevation prompt the same way.
+- **File Shredder no longer shows a blank page** when the tab is opened.
+
+### Changed
+- **Resizable grid columns everywhere** — `CanUserResizeColumns` is now enabled on all data grids for consistent behavior.
+
+## [1.7.9] - 2026-05-22
+
+### Fixed
+- **Services tab — consistent banner ordering.** The admin elevation banner now sits above the toolbar, matching the layout used by the other tabs.
+
+## [1.7.8] - 2026-05-22
+
+### Fixed
+- **Ping chart flicker** — chart buffers now use BulkObservableCollection with single
+  Reset notification instead of per-item Add/Remove, eliminating visual stutter during
+  live ping monitoring.
+
+## [1.7.7] - 2026-05-22
+
+### Fixed
+- **Uniform elevation banners** — all 10 admin-required pages now show consistent
+  elevation UI with page-specific reasons and "Run as administrator" button.
+
+## [1.7.6] - 2026-05-22
+
+### Fixed
+- **Uniform elevation banners (first 5)** — Windows Update, Windows Features, Privacy,
+  DNS & Hosts, and Services now use identical elevation banner design.
+
+## [1.7.5] - 2026-05-22
+
+### Fixed
+- **Ghost checkboxes** — eliminated phantom empty rows in Windows Update and Uninstaller
+  DataGrids via `CanUserAddRows="False"`.
+- **DNS & Hosts elevation** — added "Run as administrator" banner (was missing).
+- **File Shredder empty state** — hides table headers when no files are added.
+- **Startup column width** — "Open" button no longer cut off.
+- **Resizable columns** — all 18 DataGrid tables now support column resizing.
+
+## [1.7.4] - 2026-05-22
+
+### Fixed
+- **DNS & Hosts page empty** — view referenced non-existent converter causing silent
+  XAML load failure.
+- **Quick Tune-Up ignored No** — now asks explicit confirmation before any action.
+- **Design polish** — Bulk Installer redesigned with categories, descriptions, custom
+  search. Context Menu Manager with friendly names. Elevation badges restyled.
+
+## [1.7.3] - 2026-05-22
+
+### Fixed
+- **Critical: startup crash** — fixed "Entry point DefWindowProc not found in user32.dll"
+  that prevented the app from launching. P/Invoke declaration now correctly specifies
+  `DefWindowProcW` entry point.
+- **Shutdown crash** — fixed ObjectDisposedException when closing the app
+  (DnsHostsViewModel CTS disposal race condition).
+
+## [1.7.2] - 2026-05-22
+
+### Fixed
+- **Shutdown crash** — prevented `ObjectDisposedException` in `DnsHostsViewModel` when the app is closed while a refresh is in flight.
+
+## [1.7.1] - 2026-05-21
+
+### Fixed
+- **Code review findings** — addressed security, thread-safety, and disposal issues surfaced during review (#487).
+
+## [1.7.0] - 2026-05-21
+
+### Added
+- **Context Menu Manager** — scan, enable/disable Windows Explorer right-click entries
+  via LegacyDisable (non-destructive). Covers files, folders, directory background,
+  and desktop with search/filter and registry backup.
+
+## [1.6.0] - 2026-05-21
+
+### Added
+- **DNS Changer** — quick-switch between Google, Cloudflare, Quad9, OpenDNS, or DHCP
+  with automatic adapter detection and one-click apply/reset.
+- **Hosts File Editor** — visual editor for the Windows hosts file with add/remove/toggle
+  entries, IP/hostname validation, and automatic backup before saves.
+
+## [1.5.0] - 2026-05-21
+
+### Added
+- **Privacy Toggles** — 12 one-click privacy switches (telemetry, advertising ID, Copilot,
+  Cortana, web search, widgets, Start suggestions, lock screen tips) with instant apply
+  and registry state detection.
+
+## [1.4.0] - 2026-05-21
+
+### Added
+- **File Shredder** — secure file deletion with multiple overwrite methods (Quick 1-pass,
+  Standard 3-pass, Thorough 7-pass). Protects system paths, uses confirmation dialog,
+  supports files and folders.
+
+## [1.3.0] - 2026-05-21
+
+### Added
+- **System Info Export** — comprehensive system report (OS, CPU, GPU, RAM, storage,
+  network, SMART data) exportable to file or clipboard from the About tab.
+
+## [1.2.0] - 2026-05-21
+
+### Added
+- **Bulk App Installer** — install multiple applications via winget with curated list
+  of 25 apps across 7 categories, category/text filtering, and per-app progress.
+
+## [1.1.0] - 2026-05-21
+
+### Added
+- **Windows Update** — individual update selection via checkboxes. Users can now
+  select/deselect specific updates before installing. Added "Select all" and
+  "Deselect all" buttons. KB article IDs validated before passing to PowerShell.
+
+## [1.0.0] - 2026-05-20
+
+### Changed
+- **BREAKING:** migrated from .NET 9 to .NET 10 — requires .NET 10 Desktop Runtime
+  to run. All projects (main, tests, integration tests, UI tests) now target
+  `net10.0-windows`. CI workflows updated to use .NET 10 SDK.
+
+## [0.48.39] - 2026-05-20
+
+### Fixed
+- **ObservableCollection batch updates** — replaced Clear() + foreach Add() pattern
+  (N+1 CollectionChanged events) with BulkObservableCollection.ReplaceWith() (single
+  Reset notification) across 10 ViewModels, reducing UI notification overhead during
+  data refreshes.
+
+## [0.48.38] - 2026-05-20
+
+### Fixed
+- **LogService** — path sanitization regex now dynamically derives the user
+  profile directory from `Environment.GetFolderPath` instead of assuming a
+  hardcoded `<drive>:\Users\` pattern; falls back to the generic regex if the
+  environment variable is unavailable.
+- **MarkdownTextBlock** — cached `FontFamily("Consolas")` as a static field to
+  eliminate per-render allocation in code span formatting.
+
+## [0.48.37] - 2026-05-19
+
+### Fixed
+- **DiskHealthReport** — fixed potential integer overflow in `HealthPercent`
+  calculation when `ReadErrors` or `WriteErrors` exceed `int.MaxValue`; arithmetic
+  now uses `long` before clamping to the 0–20 deduction cap.
+- **SpeedTestService** — documented pinned Ookla CLI version (`1.2.0`) with
+  maintenance comment explaining update procedure and Authenticode verification.
+
+## [0.48.36] - 2026-05-19
+
+### Fixed
+- **MemoryTestService** — `ManagementObject` instances in `GetModulesAsync` WMI
+  query are now properly disposed via `using (mo)` block, preventing native handle
+  leaks when enumerating physical memory modules.
+- **NetworkSharedState** — `Dispose()` now fully releases all SkiaSharp paint
+  resources: series paints (stroke, geometry, fill), axis paints (name, labels,
+  separators), and class-level legend/tooltip paints. Previously only typefaces
+  were disposed, leaking unmanaged `SKPaint` handles.
+
+### Added
+- **ServicesViewModelTests** — 20 unit tests covering ApplyFilter logic: category
+  filters (All, Running, Stopped, Safe to disable, Advanced), text search by name/
+  display name/description, combined filters, sort order, empty data, and property
+  change triggers.
+
+## [0.48.35] - 2026-05-19
+
+### Fixed
+- **ProcessManagerViewModel** — resolved CodeQL `cs/complex-condition` alert (#302)
+  by replacing chained null-conditional `||` expression with a `ReadOnlySpan` loop
+  in `MatchesDescription`.
+- **PerformanceView** — eliminated MVVM violation: removed `PropertyChanged`
+  subscription and `Checked` event handler from code-behind; radio buttons now use
+  two-way `EqualityConverter` binding to `SelectedPlan` (pure XAML, no code-behind
+  logic).
+- **OperationLockServiceTests** — replaced flaky `Barrier` + `Thread.Sleep`
+  thread-safety test with deterministic `CountdownEvent` + `ManualResetEventSlim`
+  synchronization; asserts exactly 1 acquisition instead of `>= 1`.
+
+### Added
+- **EqualityConverter** — reusable two-way `IValueConverter` that compares a bound
+  value to `ConverterParameter`; ideal for radio button groups bound to a string
+  property.
+- **EqualityConverterTests** — 10 unit tests covering Convert/ConvertBack, null
+  handling, and case sensitivity.
+- **FormatHelperTests** — 14 unit tests covering `FormatSize` at all boundaries
+  (bytes, KB, MB, GB) with exact boundary and mid-range values.
+
+### Changed
+- **README.md** — added missing tech stack entries: Microsoft.Extensions.DependencyInjection,
+  H.NotifyIcon.Wpf, NSubstitute.
+
+## [0.48.34] - 2026-05-19
+
+### Fixed
+- **PerformanceService** — implemented `IDisposable` to properly dispose the
+  internal `SemaphoreSlim` gate, preventing resource leaks on app shutdown.
+
+### Changed
+- **README.md** — corrected sidebar tab counts (56 total, 25 implemented).
+- **ARCHITECTURE.md** — removed false claim that TuneUpService and
+  ShortcutCleanerService are instantiated directly (both are registered in DI).
+- **ARCHITECTURE.md** — added 9 missing services to the Key services section
+  (AppAlertService, AppBlockerService, BatteryService, DialogService,
+  IconExtractorService, OperationLockService, ProcessDescriptionService,
+  SpeedTestHistoryService, ShortcutCleanerService).
+
+## [0.48.33] - 2026-05-18
+
+### Fixed
+- **CodeQL** — resolved 5 remaining source code alerts:
+  - Replaced generic `catch (Exception)` in `ViewModelBase.InitializeAsync`
+    with specific exception types (`InvalidOperationException`,
+    `UnauthorizedAccessException`, `IOException`, `HttpRequestException`,
+    `TimeoutException`).
+  - Converted `UninstallerService.IsUnderTrustedDirectory` foreach+if to
+    LINQ `.Any()` (cs/linq/missed-where).
+  - Converted `WindowsFeaturesService.ParseFeatureList` foreach loop to
+    LINQ `.Select().Where()` pipeline (cs/linq/missed-select).
+  - Extracted `ProcessManagerViewModel.MatchesFilter` complex condition into
+    three focused helper methods (cs/complex-condition).
+  - Replaced `Path.Combine` with `Path.Join` in `UpdateService.DownloadAsync`
+    (cs/path-combine).
+- **CodeQL workflow** — added query filter to suppress `cs/call-to-obsolete-method`
+  for `UpdateService.VerifyAuthenticode` (intentional use of `CreateFromSignedFile`
+  — no modern .NET replacement exists without P/Invoke).
+
+## [0.48.32] - 2026-05-18
+
+### Fixed
+- **ConsoleViewModel** — buffer trimming now uses clear-and-rebuild when
+  removing more than 25% of lines, reducing worst-case from O(n×excess)
+  to O(n) (CQ-LOW: ConsoleViewModel O(n²)).
+- **LogsViewModel** — event log entries are now dispatched to the UI thread
+  in batches of 50 instead of one-at-a-time, reducing dispatcher overhead
+  by ~98% when loading large event logs (CQ-LOW: LogsViewModel batch dispatch).
+
+## [0.48.31] - 2026-05-18
+
+### Fixed
+- **FormatSize duplication** — extracted shared `FormatHelper.FormatSize` method;
+  `ProcessManagerViewModel`, `DiskAnalyzerViewModel`, and `DuplicateFileViewModel`
+  now delegate to the shared helper instead of duplicating the switch expression.
+- **OEM encoding duplication** — `CleanupViewModel` (SFC + DISM) and
+  `SystemHealthViewModel` (chkdsk) now use `PowerShellRunner.OemEncoding`
+  instead of duplicating the encoding resolution logic inline.
+
+### Changed
+- **Test parallelism** — enabled `parallelizeTestCollections` in xunit.runner.json
+  so pure-logic unit tests run concurrently, reducing CI test time. Tests that
+  touch shared OS resources remain serialized via `[Collection("Network")]`
+  (TEST-M4).
+- **Mocking framework** — added NSubstitute 5.3 to the test project, enabling
+  interface-based mocking for future tests that need to isolate OS dependencies
+  (TEST-H1).
+- **TESTING.md** — documented test infrastructure (frameworks, parallelism
+  strategy, conventions for mocking and time-dependent tests).
+
+## [0.48.30] - 2026-05-18
+
+### Fixed
+- **ViewModelBase** — added `InitializeAsync` helper method that wraps
+  fire-and-forget async calls with structured error handling. Exceptions
+  from async initialization are now caught and logged via Serilog instead
+  of becoming unobserved task exceptions (CQ-M3).
+- **12 ViewModels** — replaced `_ = InitAsync()` fire-and-forget pattern
+  with `InitializeAsync(InitAsync)` in: AboutViewModel, BatteryHealthViewModel,
+  CleanupViewModel, DashboardViewModel, DeepCleanupViewModel,
+  PerformanceViewModel, ProcessManagerViewModel, ServicesViewModel,
+  SpeedTestViewModel, StartupViewModel, SystemHealthViewModel,
+  WindowsUpdateViewModel.
+
+## [0.48.29] - 2026-05-18
+
+### Changed
+- **IconExtractorService** — `FindExecutableByName` results are now cached in a
+  `ConcurrentDictionary`, eliminating repeated Program Files directory scans
+  (~100+ subdirs) on every process list refresh (PERF-M5).
+- **NetworkSharedState** — `TrimBuffer` now uses a clear-and-rebuild strategy
+  when removing more than 25% of buffer entries, reducing worst-case complexity
+  from O(n×removeCount) to O(n) (PERF-M3).
+
+## [0.48.28] - 2026-05-18
+
+### Fixed
+- **CodeQL** — resolved 38 code scanning alerts across 16 source files:
+  - Replaced `Path.Combine` with `Path.Join` in 8 locations to prevent
+    unexpected path rooting when arguments contain absolute paths.
+  - Added descriptive comments to 6 empty catch blocks (intentional
+    swallowing of expected exceptions like `FormatException`, `IOException`).
+  - Replaced generic `catch (Exception)` in `TrayIconService.OnTimerTick`
+    with specific exception types (`OperationCanceledException`,
+    `ObjectDisposedException`, `InvalidOperationException`).
+  - Converted implicit foreach filters to explicit `.Where()` calls in
+    `AppAlertService`, `NetworkSharedState`, `WindowsFeaturesService`,
+    `SpeedTestService`, and `TrayIconService`.
+  - Extracted complex conditions into helper methods in
+    `UninstallerService.IsUnderTrustedDirectory` and
+    `ProcessManagerViewModel.MatchesFilter`.
+  - Flattened nested if-statements in `UninstallerViewModel.SelectAll`.
+  - Replaced `if/else` assignment with ternary in
+    `HealthScoreService` weighted average calculation.
+  - Converted `ComputeDiskScore` foreach loop to LINQ `.Select().Min()`.
+  - Converted `DashboardViewModel` manual `Dispose()` call to `using var`
+    declaration for `OperationLockService` lock guard.
+  - Removed redundant `(SolidColorBrush)` cast in
+    `OutputKindToBrushConverter`.
+- **CodeQL workflow** — added `codeql-config.yml` to exclude `obj/` and
+  `bin/` directories from analysis (36 alerts in compiler-generated code).
+
+## [0.48.27] - 2026-05-15
+
+### Fixed
+- **NetworkSharedState** — SkiaSharp `SolidColorPaint` objects are now disposed
+  when a ping target is removed, preventing unmanaged memory leaks (CQ-M1).
+- **NetworkSharedState** — latency chart offset now uses a stable hash of the
+  target host instead of `Targets.IndexOf`, preventing visual jumps when
+  targets are removed mid-session (CQ-M2).
+- **PerformanceViewModel** — added `Dispose` override to clean up snapshot
+  reference and satisfy the base class disposal contract (CQ-M4).
+
+## [0.48.26] - 2026-05-15
+
+### Changed
+- **SystemInfoService** — static WMI data (OS caption, CPU name, disk models)
+  is now cached on first query; only dynamic data (CPU load, RAM, uptime) is
+  re-queried every 60 seconds, reducing WMI overhead by ~70% (PERF-M1).
+- **NetworkSharedState** — `RecomputeStats` rewritten with manual loops instead
+  of LINQ `.Where().Select().ToList()`, eliminating heap allocations on the
+  hot path that runs 32×/sec per target (PERF-M2).
+- **TrayIconService** — added `Interlocked` re-entrancy guard on
+  `UpdateTooltipAsync` so overlapping timer ticks skip instead of stacking
+  concurrent WMI calls (PERF-M4).
+
+## [0.48.25] - 2026-05-15
+
+### Fixed
+- **HealthAnalyzer** — no longer claims "DNS is clean" when DNS IS bad; when
+  both DNS and game server show trouble, correctly returns Mixed verdict
+  instead of GameServer (FUNC-M2).
+- **TuneUpService** — empty directory removal now sorts by path depth (separator
+  count) instead of string length, ensuring deepest directories are deleted
+  first regardless of path name length (FUNC-M3).
+- **SpeedTestHistoryService** — `SaveAsync` and `ClearAsync` now serialize via
+  `SemaphoreSlim` to prevent concurrent load-modify-save races that could lose
+  history entries (FUNC-M4).
+- **FixedDriveService** — multi-disk enrichment now maps drive letters to
+  physical disks via `MSFT_Partition.DiskNumber`, correctly annotating media
+  type and bus type on systems with multiple drives (FUNC-M5).
+
+## [0.48.24] - 2026-05-15
+
+### Fixed
+- **UpdateService** — cached download now validated by SHA-256 hash (stored in
+  companion `.sha256` file) instead of file size alone; prevents cache poisoning
+  with same-size payloads (SEC-M2).
+- **SpeedTestService** — Zip Slip protection: manual extraction validates each
+  entry path stays within the target directory; blocks path traversal attacks
+  via crafted zip archives (SEC-M3).
+- **SpeedTestService** — DLL hijacking mitigation: Ookla CLI process now
+  launches with `WorkingDirectory` set to System32 instead of the user-writable
+  tools directory, preventing CWD-based DLL search order hijacking (SEC-M4).
+- **ServiceManagerService** — defensive validation on service names before
+  interpolating into registry paths; rejects names containing path separators
+  or null characters (SEC-M6).
+- **UninstallerService** — `ParseUninstallCommand` hardened: rejects shell
+  metacharacters (`|&;` backtick `$(`) to prevent command injection; improved
+  `.exe` boundary detection to avoid misparsing paths with `.exe` substrings;
+  removed unsafe fallback that treated unparseable strings as executables
+  (SEC-M7).
+- **PowerShellRunner** — expanded security contract documentation clarifying
+  that `ExecutionPolicy.Bypass` is safe only because all script content is
+  hard-coded in source; callers must never interpolate user input (SEC-M8).
+- **DiskHealthService** — replaced bare `catch` blocks in WMI conversion
+  helpers with specific exception types (`FormatException`, `OverflowException`,
+  `InvalidCastException`).
+- **DeepCleanupService** — replaced bare `catch` with specific `IOException`,
+  `UnauthorizedAccessException`, `SecurityException`.
+- **TracerouteMonitorService** — replaced bare `catch` with specific network
+  and operation exception types.
+- **TracerouteService** — replaced generic `catch (Exception)` in event raiser
+  with specific `ObjectDisposedException`, `InvalidOperationException`.
+- **PingMonitorService** — replaced bare `catch` in event raiser with specific
+  exception types.
+- **EventLogService** — replaced bare `catch` blocks in record projection and
+  message formatting with specific `EventLogException`,
+  `InvalidOperationException`.
+
+## [0.48.23] - 2026-05-15
+
+### Fixed
+- **UpdateService** — added Authenticode signature verification on downloaded
+  update binaries; rejects files with invalid (tampered) signatures (SEC-H1).
+- **AboutViewModel** — update script now uses a random GUID filename to prevent
+  TOCTOU race conditions on the updater .cmd file (SEC-M1).
+- **UninstallerService** — uninstall executables from registry are now validated
+  against trusted directories (Program Files, Windows, ProgramData,
+  LocalApplicationData); rejects paths outside these locations (SEC-H2).
+- **EventLogService** — XPath sanitization now strips all metacharacters
+  including `|()@*<>` in addition to the existing set (SEC-M5).
+- **BatteryInfo** — `HealthPercent` returns -1 (unavailable) instead of 0 when
+  WMI capacity data is missing (no admin elevation), preventing false-critical
+  health scores on every non-elevated laptop (FUNC-H1).
+- **HealthScoreService** — `ComputeBatteryScore` treats -1 (unavailable) as
+  neutral (100) instead of critical (10).
+- **BatteryHealthViewModel** — displays "requires elevation" when health data
+  is unavailable instead of showing 0%.
+- **StartupService** — registry approved-state blob now uses bitmask
+  `(blob[0] & 1) == 0` for enabled detection, fixing Windows 11 which uses
+  `07` (not just `03`) for disabled entries (FUNC-M1).
+
+## [0.48.22] - 2026-05-15
+
+### Fixed
+- **AppAlertService** — `NewAppDetected` event now marshaled to the UI thread
+  via captured `SynchronizationContext`, preventing crashes when
+  `FileSystemWatcher`/`Timer` callbacks invoke subscribers directly.
+- **NetworkRepairService** — added `SemaphoreSlim` gate to serialize
+  subscribe/unsubscribe on the shared `PowerShellRunner`, preventing
+  concurrent calls from interleaving output.
+- **PerformanceService** — same `SemaphoreSlim` serialization for all methods
+  that subscribe to `PowerShellRunner.LineReceived`.
+- **PowerShellRunner** — documented that `LineReceived` fires on thread-pool
+  threads; subscribers must marshal to the dispatcher for UI updates.
+- **StartupService** — added `RuntimeBinderException` catch for dynamic COM
+  shortcut resolution (`.lnk` files with broken targets).
+- **StartupService** — `GetAwaiter().GetResult()` on stderr task now guarded
+  with a 5-second timeout to prevent hangs if the pipe isn't fully drained.
+- **AppAlertsViewModel** — use `Application.Current.Dispatcher` instead of
+  `Dispatcher.CurrentDispatcher` to avoid capturing the wrong dispatcher.
+- **NetworkSharedState** — documented that `FlushPending` direct-call path
+  (when `Dispatcher == null`) is intentional for unit tests / headless mode.
+- **AboutViewModel** — removed auto-download of updates without user consent;
+  user must now explicitly click Download.
+- **App.xaml.cs** — single-instance activation now uses a named pipe listener,
+  fixing activation when the window is minimized to tray (no `MainWindowHandle`).
+- **MainWindow.xaml.cs** — ViewModel disposal now also hooks
+  `Application.Current.Exit` as a safety net for when `OnClosed` is not called.
+
+### Changed
+- **SysManager.csproj** — version updated from 0.12.1 to 0.48.21 (cosmetic;
+  auto-release overrides at build time).
+- **SysManager.Tests.csproj** — xunit bumped from 2.5.3 to 2.9.3 (matches
+  UITests project).
+- **SysManager.IntegrationTests.csproj** — xunit bumped from 2.5.3 to 2.9.3.
+- **dependabot.yml** — added `IntegrationTests` directory entry for NuGet
+  dependency monitoring.
+
+## [0.48.21] - 2026-05-15
+
+### Fixed
+- **AdminHelper** — `Process.GetCurrentProcess()` now properly disposed via
+  `using` in `RelaunchAsAdmin()` (prevents brief handle leak).
+- **HexToBrushConverter** — frozen brushes now cached by hex value in a
+  `ConcurrentDictionary` to eliminate repeated allocations and GC pressure
+  on frequently-updating bindings (dashboard, health score, tune-up).
+- **App.xaml.cs** — `ReleaseMutex()` wrapped in try-catch for
+  `ApplicationException` (thrown if called from wrong thread on shutdown).
+- **EtaCalculator** — added thread-safety documentation (single-thread
+  requirement via UI dispatcher).
+
+## [0.48.20] - 2026-05-15
+
+### Fixed
+- **NetworkSharedState** — replaced obsolete `SkiaPaint.FontFamily` with
+  `SKTypeface = SKTypeface.FromFamilyName()` on 4 axis paint objects,
+  eliminating all CS0618 build warnings.
+- **AboutViewModel** — replaced `Assembly.Location` (returns empty in
+  single-file publish) with `AppContext.BaseDirectory` lookup, eliminating
+  IL3000 warning.
+
+## [0.48.19] - 2026-05-15
+
+### Fixed
+- **DuplicateFileService** — skip reparse points (symlinks, junctions) during
+  directory traversal to prevent infinite loops on circular symlinks.
+- **LargeFileScanner** — same reparse point check added.
+- **DeepCleanupService** — `EnumerateFiles()` now catches `IOException` and
+  `UnauthorizedAccessException` during `MoveNext()` iteration, not just at
+  enumerator creation. Prevents crashes on files that become inaccessible
+  mid-scan.
+- **TrayIconService** — `OnTimerTick` (async void) now wraps the entire call
+  in try-catch to prevent unhandled exceptions from crashing the application.
+
+## [0.48.18] - 2026-05-15
+
+### Fixed
+- **SystemInfoService** — `QueryMemory()` and `QueryDisks()` now properly
+  dispose `ManagementObject` and `ManagementObjectCollection` instances via
+  `using` statements (4 foreach loops fixed, prevents COM handle leaks).
+- **FixedDriveService** — same WMI disposal fix for MSFT_PhysicalDisk query.
+- **DeepCleanupViewModel** — post-clean rescan no longer deadlocks on the
+  operation lock. Extracted `ScanCoreAsync()` (lock-free) called from
+  `CleanAsync` which already holds the disk lock.
+- **WindowsFeaturesViewModel** — separated shared `_cts` into `_scanCts` and
+  `_toggleCts` so toggling a feature no longer cancels a running scan.
+
+## [0.48.17] - 2026-05-15
+
+### Fixed
+- **DeepCleanupViewModel** — dispose previous CancellationTokenSource before
+  creating a new one in Scan/Clean/LargeScan (3 locations). Prevents kernel
+  handle leak on repeated operations.
+- **SpeedTestViewModel** — same CTS disposal fix (2 locations: HTTP + Ookla).
+- **TracerouteViewModel** — same CTS disposal fix.
+- **ShortcutCleanerViewModel** — same CTS disposal fix.
+- **NavItem** — implement `IDisposable` to unsubscribe `PropertyChanged`
+  handler from ViewModel on teardown. Previously 51 subscriptions leaked
+  permanently. `MainWindowViewModel.Dispose()` now disposes all NavItems.
+
+## [0.48.16] - 2026-05-15
+
+### Fixed
+- **SpeedTestService** — stdout and stderr now read in parallel via
+  `Task.WhenAll` to prevent classic Windows pipe buffer deadlock when
+  Ookla CLI writes enough to stderr while stdout is being consumed.
+- **DiskHealthService** — added regex validation (`^[\w{}\-\\.:/]+$`) on
+  WMI objectId before WQL interpolation (defense-in-depth against injection).
+- **UninstallerService** — tightened `PackageIdPattern` regex: replaced `\s`
+  (which allows tabs/newlines) with a literal space character.
+
+### Changed
+- **WindowsFeaturesService** — added SECURITY-CRITICAL documentation comment
+  on `FeatureNamePattern()` regex explaining it is the sole injection defense.
+
+## [0.48.15] - 2026-05-15
+
+### Fixed
+- **AppBlockerView, AppAlertsView, ShortcutCleanerView** — removed XAML
+  `<UserControl.DataContext>` that bypassed DI container, causing these views
+  to operate on isolated ViewModel instances instead of the shared singletons.
+- **DashboardView** — ColorHex string bindings now use `HexToBrushConverter`
+  instead of invalid `<SolidColorBrush Color="{Binding}"/>` which produced
+  runtime binding errors (health score ring, recommendations, disk verdicts,
+  tune-up overall verdict).
+- **WindowsFeaturesView** — "Not elevated" warning badge now uses `FlexVis`
+  converter (supports `ConverterParameter=Inverse`) instead of `BoolToVis`
+  which ignores the parameter, causing the badge to always display.
+
+### Changed
+- **AppBlockerView, AppAlertsView** — replaced legacy `SystemControlForeground*`
+  brushes with app-standard `TextPrimary`/`TextSecondary`/`Border1` resources
+  for consistent dark-theme styling.
+- **MainWindowViewModel** — corrected stale comment "non-DI resolved" to
+  "resolved from DI at runtime" (all 4 VMs are DI singletons since v0.48.0).
+
+## [0.48.14] - 2026-05-15
+
+### Fixed
+- **SystemInfoService (CQ-002)** — ManagementObjectCollection and ManagementObject
+  instances now properly disposed via `using` in QueryOs() and QueryCpu().
+- **HexToBrushConverter** — SolidColorBrush now frozen after creation to prevent
+  cross-thread access crashes; bare `catch` narrowed to `catch (FormatException)`.
+
+### Changed
+- **LargeFileScanner, DuplicateFileService, DiskAnalyzerService** — replaced
+  remaining `Array.Empty<T>()` with collection expressions `[]` (MODERN-003).
+
+## [0.48.13] - 2026-05-15
+
+### Fixed
+- **UninstallerService (SEC-007)** — trusted system binaries (MsiExec, rundll32)
+  now resolved to absolute System32 path before execution, preventing PATH
+  hijacking attacks.
+- **SpeedTestService (SEC-008)** — Ookla CLI process now killed on timeout or
+  cancellation, preventing orphan processes consuming resources indefinitely.
+- **SpeedTestService (PRIV-001)** — all exception messages in Log.Debug calls
+  now sanitized via LogService.SanitizePath to prevent username leakage in logs.
+
+## [0.48.12] - 2026-05-15
+
+### Fixed
+- **DiskHealthService (CQ-007)** — WQL ASSOCIATORS OF query now escapes single
+  quotes in objectId, preventing potential WQL injection.
+- **OperationLockService (CQ-008)** — removed redundant lock object; TryAcquire
+  and Release now use ConcurrentDictionary atomic TryAdd/TryRemove directly.
+- **PingMonitorService (CQ-015)** — CancellationTokenSource only disposed if the
+  background loop actually completed, preventing ObjectDisposedException in
+  still-running pump tasks.
+
+## [0.48.11] - 2026-05-15
+
+### Fixed
+- **ProcessManagerViewModel (CQ-004)** — replaced sync-over-async
+  `GetAwaiter().GetResult()` with proper `await` inside `Task.Run` async
+  lambda, preventing thread pool thread blocking.
+- **DeepCleanupService (CQ-010)** — replaced `Directory.GetFiles()` and
+  `GetDirectories()` (full array allocation) with lazy `EnumerateFiles()`
+  and `EnumerateDirectories()` to reduce memory pressure on large directories.
+- **TracerouteService (CQ-011)** — bare `catch {}` replaced with specific
+  `PingException`, `SocketException`, `InvalidOperationException` catches;
+  subscriber error catch narrowed to `catch (Exception)`.
+
+## [0.48.10] - 2026-05-15
+
+### Fixed
+- **DiskHealthService (CQ-001)** — ManagementObjectCollection and ManagementObject
+  instances now properly disposed via `using` statements, preventing COM resource
+  leaks during SMART/reliability queries.
+- **SpeedTestService (CQ-003)** — Ookla CLI process now has a 5-minute independent
+  timeout via linked CancellationTokenSource, preventing indefinite hangs.
+
+### Changed
+- **CONTRIBUTING.md** — corrected .NET SDK reference from 8 to 9; added
+  SysManager.IntegrationTests to project layout.
+- **SECURITY.md** — updated supported versions table to reflect 0.48.x as latest.
+
+## [0.48.9] - 2026-05-14
+
+### Fixed
+- **SpeedTestService** — empty catch blocks replaced with `Log.Debug` calls for
+  best-effort file cleanup (resolves 4 CodeQL `cs/empty-catch-block` alerts).
+- **WindowsFeaturesViewModel** — if/else replaced with ternary for enable/disable
+  dispatch (CodeQL `cs/missed-ternary-operator`).
+- **UninstallerViewModel** — if/else replaced with ternary for local vs winget
+  uninstall dispatch (CodeQL `cs/missed-ternary-operator`).
+
+## [0.48.8] - 2026-05-14
+
+### Fixed
+- **UninstallerService (SEC-005)** — `StartsWith` allowlist replaced with exact
+  filename match to prevent bypass via similarly-named executables (e.g.
+  "MsiExecEvil.exe"). `/I` → `/X` replacement now uses regex word-boundary
+  match to avoid corrupting GUIDs.
+- **SpeedTestService (SEC-006)** — Authenticode verification now fail-closed:
+  if the Ookla binary is unsigned or subject mismatches, it is deleted and an
+  exception is thrown instead of just logging a warning.
+- **DialogService** — singleton setter now rejects null to prevent global
+  null-swap hazards.
+- **Application.Current.Shutdown()** — added null-conditional `?.` operator on
+  all 5 shutdown call sites (WindowsUpdateVM ×2, DashboardVM, AppUpdatesVM,
+  TrayIconService) to prevent NullReferenceException in tests or non-standard
+  hosting.
+- **AboutViewModel** — clipboard copy no longer reports success when
+  `Clipboard.SetText` throws `ExternalException` (clipboard locked).
+- **NetworkSharedState** — TOCTOU race in FlushPending replaced
+  `ContainsKey` + indexer with `TryGetValue`; all paint SKTypeface instances
+  now disposed on cleanup (LEAK-003 complete).
+- **AppAlertService** — replaced `ContainsKey` + set with atomic `TryAdd` to
+  prevent duplicate new-app notifications in race conditions.
+- **PerformanceService** — `CreateRestorePointAsync` no longer uses always-true
+  `results != null` check; relies on exception propagation for failure.
+- **ServiceManagerService** — service name regex narrowed from `\s` (any
+  whitespace including newlines) to literal space only.
+- **WindowsFeaturesViewModel** — CancellationTokenSource now cancelled before
+  disposal in all code paths to prevent orphaned in-flight operations.
+- **App.xaml.cs** — DI ServiceProvider now disposed on application exit,
+  ensuring all DI-owned singletons implementing IDisposable are cleaned up.
+- **DashboardView.xaml** — disk verdict and overall tune-up verdict colors now
+  bound to model `ColorHex`/`OverallColorHex` instead of hardcoded green.
+
+## [0.48.7] - 2026-05-14
+
+### Fixed
+- **UninstallerService (SEC-002)** — UninstallLocalAsync now validates that the
+  executable exists and has a .exe extension before running. Prevents execution
+  of arbitrary commands from HKCU registry keys (modifiable without admin).
+- **EventLogService (SEC-003)** — XPath sanitization now strips quotes, brackets,
+  slashes in addition to single quotes to prevent XPath injection.
+- **LogService (SEC-004)** — path sanitization regex now covers all drive letters
+  (A-Z:\Users\) instead of only C: drive.
+
+### Changed
+- **Modern C#** — replaced Array.Empty<T>() with collection expressions []
+  across 7 files: DiskAnalyzerService, DuplicateFileService, LargeFileScanner,
+  UpdateService, CleanupCategory, TuneUpResult, HealthScoreResult (MODERN-003).
+
+## [0.48.6] - 2026-05-14
+
+### Fixed
+- **PingMonitorService** — bare catch replaced with specific AggregateException
+  and ObjectDisposedException (CodeQL cs/catch-of-all-exceptions).
+- **TracerouteMonitorService** — same bare catch fix.
+- **OutputKindToBrushConverter** — simplifiable boolean expression refactored
+  to pattern matching (CodeQL cs/simplifiable-boolean-expression).
+- **LogsViewModel** — unsafe cast from ICollectionView to CollectionView
+  replaced with safe as-cast with fallback (CodeQL cs/cast-from-abstract).
+
+## [0.48.5] - 2026-05-14
+
+### Changed
+- **DuplicateFileService** — ShouldSkipDir uses OrdinalIgnoreCase instead of
+  ToLowerInvariant allocation on every path (PERF-002).
+- **LargeFileScanner** — same OrdinalIgnoreCase fix (PERF-002).
+- **SpeedTestService** — SHA-256 hashing uses stream instead of
+  File.ReadAllBytes to avoid loading entire zip into memory (PERF-004).
+- **ProcessManagerService** — MainModule accessed once per process instead of
+  twice, halving P/Invoke overhead (PERF-005).
+- **AboutViewModel** — CopyEnvironmentInfo WMI queries now run on background
+  thread via Task.Run, preventing UI freeze (PERF-008).
+
+## [0.48.4] - 2026-05-14
+
+### Fixed
+- **IconExtractorService** — cache eviction race condition resolved with
+  double-checked lock pattern (THR-002).
+- **PingMonitorService** — Start/Stop race on _cts resolved with lock around
+  state transitions (THR-003).
+- **TracerouteMonitorService** — same Start/Stop race fix as PingMonitor
+  (THR-003).
+- **AppAlertService** — List<FileSystemWatcher> access from concurrent threads
+  protected with lock on Start/Stop (THR-004).
+- **NetworkRepairService** — List<string> output replaced with ConcurrentQueue
+  to prevent corruption from background thread callbacks (THR-005).
+- **PerformanceView** — SyncRadioButtons now marshals to UI thread via
+  Dispatcher.BeginInvoke when called from background (THR-006).
+
+## [0.48.3] - 2026-05-14
+
+### Fixed
+- **DuplicateFileGroup** — WastedBytes now raises PropertyChanged when Count or
+  FileSize changes (missing NotifyPropertyChangedFor attributes).
+- **UpdateService** — pre-release and draft GitHub releases are now filtered out
+  in GetRecentAsync results.
+- **ServiceManagerService** — StartService no longer throws when the service is
+  already in StartPending state.
+- **DiskAnalyzerService** — empty directories are no longer incorrectly flagged
+  as access-denied; the flag now tracks actual UnauthorizedAccessException.
+- **WindowsUpdateViewModel** — null-conditional on Application.Current before
+  calling Shutdown() prevents NullReferenceException during unit tests or
+  non-standard hosting.
+- **TuneUpService** — SHEmptyRecycleBin HRESULT is now checked; returns false
+  on failure instead of always reporting success.
+
+## [0.48.2] - 2026-05-14
+
+> **Note:** Versions 0.49.0–0.53.1 below were released under the previous
+> repository (`SysManager`). When the project migrated to `SystemManager`
+> (2026-05-14), the auto-release workflow reset to the last tag on the new
+> repo (v0.48.1). Subsequent releases continue from 0.48.2 onward.
+> The entries below are preserved for historical completeness.
+
+### Fixed
+- **Security: SpeedTestService** — remove fabricated placeholder SHA-256 hashes
+  that caused perpetual warning logs (alert fatigue). Security now relies on
+  Authenticode signature verification of the extracted binary + zip structural
+  integrity check (SEC-001).
+
+## [0.53.1] - 2026-05-14
+
+### Fixed
+- **Resource leak: NetworkSharedState** — dispose SKTypeface on LegendTextPaint
+  in Dispose() to release unmanaged SkiaSharp memory (LEAK-003).
+- **Resource leak: TrayIconService** — dispose icon resource stream after
+  creating System.Drawing.Icon to prevent stream leak (LEAK-006).
+- **Resource leak: MemoryTestService** — dispose Process returned by
+  Process.Start when launching mdsched.exe (LEAK-007).
+
+## [0.53.0] - 2026-05-13
+
+### Added
+- **Navigation: 4 new groups** — Gaming & Profiles, Privacy & Security,
+  Customization, and Advanced groups added to sidebar navigation.
+- **Gaming & Profiles (5 WIP tabs)** — Gaming Profile, Standby List Cleaner,
+  Timer Resolution, CPU Core Affinity, Display Profiles.
+- **Privacy & Security (6 WIP tabs)** — Privacy & Telemetry, Debloater & Ads,
+  Browser Cleaner, Edge/OneDrive Remover, Defender Tweaks, Notification Blocker.
+- **Customization (4 WIP tabs)** — Context Menu, Dark Mode Scheduler, Volume
+  Control, Environment Variables.
+- **Advanced (4 WIP tabs)** — Restore Points, Profile Export/Import, CLI
+  Interface, System Report.
+- **Monitor (3 new WIP tabs)** — File Lock Detector, Settings Watchdog,
+  Bandwidth Monitor added to existing Monitor group.
+- **System (2 new WIP tabs)** — Task Scheduler, Boot Analyzer added to
+  existing System group.
+- **Cleanup (1 new WIP tab)** — Scheduled Maintenance moved into Cleanup group.
+
+### Changed
+- **Navigation structure** — reorganized from 9 groups to 12 groups for better
+  feature categorization as the app grows.
+- **Placeholder descriptions** — improved all WIP placeholder descriptions with
+  clearer feature explanations and correct issue references.
+
+## [0.52.0] - 2026-05-13
+
+### Fixed
+- **Resource leak: BatteryService** — dispose WMI ManagementObject instances
+  in foreach loops to prevent COM RCW accumulation (LEAK-001, partial).
+- **Resource leak: ShortcutCleanerService** — remove double ReleaseComObject
+  on same COM interface to prevent undefined behavior (LEAK-002).
+- **Resource leak: UninstallerViewModel** — store LineReceived handler in field
+  and unsubscribe in Dispose to prevent memory leak (LEAK-004).
+- **Bug: WindowsFeaturesViewModel** — call NotifyCanExecuteChanged on
+  ToggleFeatureCommand when IsBusy changes to prevent double-clicks (BUG-001).
+- **Thread safety: ProcessStatusToBrushConverter** — freeze static brushes to
+  prevent cross-thread InvalidOperationException (THR-001, partial).
+- **Performance: BoolToElevationBadgeBrushConverter** — pre-create static frozen
+  brush instances instead of allocating per Convert call (PERF-001, partial).
+
+## [0.51.0] - 2026-05-13
+
+### Fixed
+- **Security: PowerShellRunner** — document ExecutionPolicy Bypass usage and
+  caller restrictions in XML doc comment (SEC-005).
+- **Performance: App.xaml** — remove DropShadowEffect from CardElevated style
+  to avoid software-rendered shadows (PERF-008).
+- **Testing: IntegrationTests** — align dependency versions with Tests project
+  (coverlet 10.0.0, Test.Sdk 18.5.1, xunit.runner 3.1.5) (TEST-008).
+
+## [0.50.0] - 2026-05-13
+
+### Fixed
+- **Performance: ConsoleViewModel** — fix O(n²) trim by removing from index 0
+  forward instead of reverse-order removal (PERF-005).
+- **Performance: ProcessManagerViewModel** — move icon extraction and process
+  description lookup to background thread to prevent UI freezes (PERF-007).
+- **CI: auto-release** — detect breaking change commits (feat!:/fix!:) and
+  bump major version instead of treating them as minor/patch (CI-001).
+- **CI: ci.yml** — add warning annotation when UI automation tests fail so
+  failures are visible on PRs without blocking merge (TEST-005).
+
+## [0.49.0] - 2026-05-13
+
+### Fixed
+- **Binding: BatteryInfo** — add NotifyPropertyChangedFor on DesignCapacityMWh,
+  FullChargeCapacityMWh, EstimatedRuntimeMinutes for computed properties
+  HealthPercent, WearPercent, RuntimeDisplay (BIND-001).
+- **Binding: DiskHealthReport** — add NotifyPropertyChangedFor on HealthStatus,
+  TemperatureC, WearPercent, PowerOnHours, ReadErrors, WriteErrors for 6+
+  computed properties (BIND-002).
+- **Binding: FriendlyEventEntry** — add NotifyPropertyChangedFor on Timestamp
+  and Severity for RelativeTime, FullTimestamp, SeverityIcon, SeverityColor
+  (BIND-003).
+- **Binding: PerformanceProfile** — add NotifyPropertyChangedFor on
+  ActivePlanName and ActivePlanGuid for ProfileSummary (BIND-004).
+- **Binding: ProcessEntry** — add NotifyPropertyChangedFor on MemoryBytes for
+  MemoryDisplay (BIND-005).
+- **Binding: DiskUsageEntry** — add NotifyPropertyChangedFor on SizeBytes for
+  SizeDisplay (BIND-006).
+- **Binding: InstalledApp** — add NotifyPropertyChangedFor on SizeBytes for
+  SizeDisplay (BIND-007).
+- **Memory: DeepCleanupViewModel** — replace anonymous PropertyChanged lambda
+  with named handler, unsubscribe on rescan and Dispose (MEM-006).
+- **Memory: ShortcutCleanerViewModel** — replace anonymous PropertyChanged
+  lambda with named handler, unsubscribe on rescan and Dispose (MEM-007).
+- **Bug: MemoryTestService** — set ReverseDirection=true on EventLogQuery so
+  the cutoff break works correctly with newest-first ordering (BUG-002).
+- **Bug: PerformanceService** — fix CreateRestorePointAsync by embedding
+  description directly in script instead of using AddParameter which doesn't
+  create script-scope variables (BUG-003).
+- **Bug: SpeedTestView/CleanupView/DeepCleanupView/NetworkRepairView/
+  SystemHealthView/TracerouteView/AboutView** — replace FlexVis converter
+  misuse on IsEnabled with dedicated BoolInverterConverter (BUG-004, BUG-005).
+- **Security: ServiceManagerService** — replace weak quote-only validation with
+  strict allowlist regex for sc.exe service name arguments (SEC-006).
+- **Performance: LogsViewModel** — use CollectionView.Count directly instead of
+  iterating entire filtered view via Cast/Count (PERF-002).
+- **Performance: NetworkSharedState** — simplify buffer trimming to remove from
+  front sequentially (PERF-003).
+- **Performance: MarkdownTextBlock** — use static compiled Regex instead of
+  creating new state machine on every parse call (PERF-004).
+- **Performance: DiskAnalyzerService** — use StringComparison.OrdinalIgnoreCase
+  instead of allocating ToLowerInvariant copy on every path (PERF-006).
+
+## [0.48.0] - 2026-05-13
+
+### Fixed
+- **Security: UpdateService** — treat missing .sha256 hash file as verification
+  failure instead of silently passing (SEC-001).
+- **Security: SpeedTestService** — pin expected SHA-256 hashes for Ookla CLI
+  download, log warning on mismatch (SEC-002).
+- **Security: AppBlockerService** — apply same input validation regex to
+  UnblockApp as BlockApp to prevent registry path injection (SEC-004).
+- **Memory: AppUpdatesViewModel** — store LineReceived handler in field and
+  unsubscribe in Dispose to prevent event subscription leak (MEM-001).
+- **Memory: NetworkSharedState** — unsubscribe Pinger.SampleReceived and
+  TraceMonitor.RouteCompleted in Dispose, dispose TraceMonitor (MEM-002).
+- **Memory: ConsoleView** — unsubscribe from previous DataContext's
+  CollectionChanged before subscribing to new one (MEM-003).
+- **Memory: PerformanceView** — store PropertyChanged handler and unsubscribe
+  from previous VM on DataContext change (MEM-004).
+- **Bug: DuplicateFileGroup** — guard WastedBytes with Math.Max to prevent
+  negative value when Count is 0 (BUG-001).
+- **Performance: ProcessEntry** — cache CanOpenFileLocation on creation instead
+  of calling File.Exists on every property evaluation (PERF-001).
+- **Bug: WindowsFeaturesViewModel** — add CanExecute guard on ToggleFeature
+  command to prevent rapid-click race condition (BUG-006).
+
+## [0.47.1] - 2026-05-13
+
+### Fixed
+- **Ten high-priority code-review findings** — a batch of correctness and security fixes from the code review, plus the SECURITY.md supported-versions update to the 0.47.x line.
+
+## [0.47.0] - 2026-05-13
+
+### Changed
+- **Migrate to .NET 9** — all projects now target `net9.0-windows`. CI
+  workflows updated to use .NET 9 SDK. `Microsoft.Extensions.DependencyInjection`
+  bumped to 9.0.4. Closes #257.
+- **DI: PowerShellRunner is now Transient** — each ViewModel gets its own
+  instance to prevent LineReceived event cross-talk between tabs.
+
+### Fixed
+- **Uninstaller** — filter out entries with names shorter than 2 characters
+  (eliminates empty rows from winget list parsing edge cases).
+- **Process Manager** — explicitly enable column resizing (`CanUserResizeColumns`).
+- **Windows Features** — show "Not elevated" warning badge when not running
+  as Administrator.
+- **SpeedTestService** — suppress SYSLIB0057 obsolete warning for
+  `CreateFromSignedFile` (no .NET 9 replacement for Authenticode verification).
+
+## [0.46.0] - 2026-05-13
+
+### Added
+- **Windows Features tab** — list, enable, and disable Windows optional
+  features (Hyper-V, WSL, .NET 3.5, Telnet, etc.) directly from SysManager.
+  Features are categorized (Virtualization, Networking, Development, Media,
+  Legacy). Toggle requires admin. Shows reboot-required status. Includes
+  search/filter. Closes #5.
+
+## [0.45.0] - 2026-05-13
+
+### Added
+- **Dependency Injection container** — introduced
+  `Microsoft.Extensions.DependencyInjection` for service and ViewModel
+  lifetime management. All services (PowerShellRunner, SystemInfoService,
+  WingetService, TrayIconService) are now shared singletons resolved from
+  the container. MainWindowViewModel resolves child VMs from DI at runtime,
+  falls back to manual creation in tests. Closes #255.
+
+## [0.44.0] - 2026-05-13
+
+### Added
+- **Uninstaller — Local app support** — apps not managed by winget (per-user
+  installs, legacy software, custom apps) can now be uninstalled directly
+  using their registry UninstallString. The service parses quoted paths,
+  MsiExec commands, and rundll32 invocations. Prefers QuietUninstallString
+  when available. Closes #236.
+
+## [0.43.0] - 2026-05-12
+
+### Added
+- **ETA Calculator** — reusable helper that estimates time remaining for
+  any progress-based operation. Integrated into Speed Test (HTTP + Ookla)
+  and Deep Cleanup (scan + clean). Shows human-friendly estimates like
+  "~2 min 15 s" next to progress bars. Closes #241.
+
+## [0.42.0] - 2026-05-12
+
+### Added
+- **Drivers — Scrollable view** — wrapped the Drivers tab in a
+  ScrollViewer so the full content (toolbar, summary, table) is
+  scrollable when the window is small. DataGrid has explicit
+  VerticalScrollBarVisibility and MaxHeight for large driver lists.
+  Closes #235.
+
+## [0.41.0] - 2026-05-12
+
+### Added
+- **Speed Test — History tracking** — each speed test result (HTTP and
+  Ookla) is saved to disk and displayed in a history table below the
+  test card. Stores up to 20 results per engine with date, download,
+  upload, ping, and server. Clear button per engine. Persists between
+  sessions. Closes #237.
+
+## [0.40.1] - 2026-05-12
+
+### Fixed
+- **Auto-update** — "Install" now performs a true in-place update: verifies
+  SHA256 hash of the downloaded build, writes an updater script that waits
+  for the current process to exit, copies the new executable over the old
+  one, and restarts. Previously it only launched the new exe from a temp
+  folder without replacing the original. Closes #240.
+
+## [0.40.0] - 2026-05-12
+
+### Added
+- **System Logs — Row highlight** — toggle highlight on any log entry
+  for better visibility when reviewing events. Closes #233.
+- **Services — Row highlight** — toggle highlight on any service row
+  to mark entries of interest while browsing. Closes #239.
+
+## [0.39.0] - 2026-05-12
+
+### Added
+- **About — Changelog link** — new "View Changelog" button opens the
+  GitHub CHANGELOG.md in the browser. Closes #232.
+- **Drivers — Hide system drivers** — toggle to filter out Microsoft /
+  Windows drivers from the list, showing only third-party drivers.
+  Closes #234.
+- **Startup Manager — Hide Windows entries** — toggle to filter out
+  Microsoft / Windows startup items that should not be disabled.
+  Closes #238.
+
+## [0.38.0] - 2026-05-12
+
+### Added
+- **System Tray mode** — minimize-to-tray on window close, background
+  health monitoring every 60 seconds, CPU/RAM/uptime tooltip on hover,
+  Windows toast notifications when RAM > 90%, uptime > 14 days, or disk
+  health degrades. Right-click context menu with Show / Exit. Uses
+  H.NotifyIcon.Wpf 2.2.1. Closes #262.
+
+## [0.37.0] - 2026-05-12
+
+### Added
+- **Dashboard — Health Score card** — overall system health gauge (0–100)
+  combining disk SMART, RAM usage, uptime, and battery wear (on laptops).
+  Color-coded circular ring with label (Excellent/Good/Fair/Poor) and up
+  to 3 actionable recommendations. Auto-computes on load and refreshes
+  with "Scan system". Closes #259.
+- **HealthScoreService** — aggregates SystemInfoService, DiskHealthService,
+  and BatteryService into a weighted health score.
+
+## [0.36.0] - 2026-05-12
+
+### Added
+- **Dashboard — Quick Tune-Up wizard** — one-click button that runs safe
+  cleanup (temp files), optionally empties Recycle Bin (with confirmation),
+  scans for broken shortcuts (report only), checks disk SMART health,
+  flags high uptime (14+ days) and high RAM usage (85%+). Displays a
+  dismissible summary card with freed space, disk verdicts, and
+  recommendations. Non-destructive, no admin required. Closes #261.
+- **IntGreaterThanZeroConverter** — value converter for conditional
+  visibility when an integer is greater than zero.
+- **IDialogService** — abstraction for user confirmation dialogs, replacing
+  direct `MessageBox.Show` calls in ViewModels. Enables unit testing of
+  confirmation-gated code paths (CQ-003).
+
+### Fixed
+- **Disk Health** — `TemperatureColorHex` returns grey (#9AA0A6) for drives
+  without temperature sensors instead of misleading red (QA-004).
+- **Battery Health** — `HealthPercent` clamped to 0–100, `WearPercent`
+  clamped to ≥0 for new batteries exceeding design capacity (QA-005).
+- **Network Monitor** — `TrimBuffer` batch-removes expired points from
+  end-to-start, eliminating O(n²) array shifting (CQ-001).
+- **Shortcut Cleaner** — COM objects (`IShellLink`, `IPersistFile`) now
+  released via `Marshal.ReleaseComObject` in finally block (SEC-006).
+- **Models** — deduplicated `FormatSize` from `DiskUsageEntry`, `InstalledApp`,
+  and `ProcessEntry`; all now use `CleanupCategory.HumanSize` (CQ-002).
+- **Console** — batch-remove excess lines from end-to-start instead of
+  repeated `RemoveAt(0)`, reducing O(n) per append to amortized O(1) (CQ-008).
+
+### Security
+- **Speed Test** — improved download integrity comment and added
+  Authenticode signature verification on extracted speedtest.exe (SEC-001).
+
+## [0.35.12] - 2026-05-12
+
+### Fixed
+- **Code-review batch 2** — `IDialogService` extraction plus a set of QA and security fixes from the second code-review pass.
+
+## [0.35.11] - 2026-05-12
+
+### Fixed
+- **Process Manager** — null-safe filter: `ApplyFilter` no longer throws
+  `NullReferenceException` when `Description`, `PlainDescription`, or
+  `Category` are null (QA-002).
+- **Network Monitor** — `Buffers`/`TraceBuffers` changed from `Dictionary`
+  to `ConcurrentDictionary` to prevent `InvalidOperationException` under
+  concurrent timer + UI access (QA-003).
+- **Disk Analyzer** — `DrillDown`/`GoUp` now await `AnalyzeAsync()` instead
+  of fire-and-forget, preventing race conditions with the operation lock
+  (QA-001).
+- **Console** — `Dispatcher.Invoke` → `BeginInvoke` to avoid thread-pool
+  starvation under heavy output (CQ-005).
+- **Integration tests** — `UpdateServiceTests.Constants_AreSet` expects
+  `"SystemManager"` matching the renamed repo (TEST-004).
+
+### Security
+- **chkdsk** — drive letter validated with `^[A-Z]:$` regex before
+  interpolation into process arguments (SEC-003).
+- **App Blocker** — `exeName` validated with `^[A-Za-z0-9_\-. ]+\.exe$`
+  regex to prevent registry path injection via IFEO (SEC-004).
+- **Restore Point** — `CreateRestorePointAsync` uses parameterized
+  PowerShell (`$desc` variable) instead of string concatenation (SEC-002).
+
+## [0.35.10] - 2026-05-08
+
+### Fixed
+- **Auto-update** — UpdateService now points to the new `SystemManager` repo
+  name instead of the old `SysManager`. Without this fix, the in-app update
+  checker would fail to find new releases.
+
+## [0.35.9] - 2026-05-08
+
+### Changed
+- **Code quality** — refactored implicit `foreach` filters to explicit LINQ
+  `.Where()` calls across 7 files (GatewayHelper, FixedDriveService,
+  AppAlertService, DeepCleanupService, LargeFileScanner,
+  ProcessDescriptionService, ShortcutCleanerViewModel). Resolves CodeQL
+  `cs/linq/missed-where` alerts.
+
+## [0.35.8] - 2026-05-08
+
+### Fixed
+- **Ping chart** — fixed chart visual collapse that occurred after 2–5 seconds
+  of monitoring. Root cause: LiveCharts auto-scaled the X-axis on every buffer
+  trim, causing momentary layout thrashing. Fix pins the X-axis to a fixed
+  time window (now − windowSeconds → now) during active monitoring, and adds
+  MinHeight="200" to prevent layout collapse. Axis limits reset on Stop/Clear
+  (#518).
+
+## [0.35.7] - 2026-05-08
+
+### Fixed
+- **Encoding** — all native Windows tools (powercfg, ipconfig, netsh, sc.exe)
+  now use OEM encoding for output parsing, matching the fix applied to chkdsk,
+  sfc, and DISM. Added centralized `PowerShellRunner.OemEncoding` static
+  property. Prevents garbled output on non-English Windows systems.
+
+## [0.35.6] - 2026-05-08
+
+### Removed
+- **Old green progress panel** — removed the legacy green-bordered background
+  task tray from the sidebar footer. Progress is now shown exclusively via the
+  blue indeterminate bar under each tab name in the sidebar (#513).
+
+## [0.35.5] - 2026-05-08
+
+### Fixed
+- **chkdsk** — register OEM code pages (437, 852, etc.) at application startup
+  via `CodePagesEncodingProvider`. On .NET 8, these code pages are not available
+  by default, causing chkdsk output parsing to fail with encoding errors on
+  non-English systems (#505).
+
+## [0.35.4] - 2026-05-08
+
+### Fixed
+- **Traceroute** — reduced per-hop timeout from 3s to 2s and DNS reverse
+  lookup timeout from 1.5s to 800ms. Prevents the appearance of freezing
+  when intermediate hops don't respond (#519).
+
+## [0.35.3] - 2026-05-08
+
+### Fixed
+- **Duplicate Finder** — replaced non-virtualized `ItemsControl` with a
+  virtualized `ListView` to prevent UI freezes when displaying thousands of
+  duplicate groups (#527).
+- **Process Manager** — reduced column widths (PID 55, Mem 70, CPU 50,
+  Thr 45) and added `MinWidth="200"` on the Name column to prevent columns
+  from crowding on smaller screens (#511).
+
+## [0.35.2] - 2026-05-08
+
+### Fixed
+- **Shortcut Cleaner** — tab was showing a black page due to referencing
+  undefined `BoolToVisibility` converter. Rewrote the View with correct
+  converter names and matching app theme styles (#512).
+- **Startup Manager** — blank placeholder row at the bottom of the table
+  caused by missing `CanUserAddRows="False"` on the DataGrid (#509).
+- **Disk Analyzer** — two confusing "Open" buttons renamed: drill-down is
+  now "→" and Show in Explorer is now "📂" with distinct tooltips (#514, #515).
+
+## [0.35.1] - 2026-05-07
+
+### Fixed
+- **Deep Cleanup / Duplicate Finder** — use Windows Known Folder API
+  (SHGetKnownFolderPath) to resolve Downloads, Documents, Desktop, Pictures,
+  Music, and Videos paths. If the user has moved these folders to a different
+  drive (e.g. D:\Downloads), the application now detects the actual location
+  instead of assuming the default C:\Users path (#483).
+
+## [0.35.0] - 2026-05-07
+
+### Added
+- **DataGrid sort arrows** — all sortable DataGrid column headers now display
+  an ascending (▲) or descending (▼) arrow indicator on the currently sorted
+  column (#488).
+- **DataGrid hover highlight** — column headers change background color and
+  show a hand cursor on hover to signal interactivity (#489).
+
+## [0.34.2] - 2026-05-07
+
+### Fixed
+- **Disk Analyzer** — skip junctions, symbolic links, and mount points during
+  folder traversal to prevent double-counting files reachable through multiple
+  paths (e.g. `C:\Documents and Settings` → `C:\Users`). Fixes reported total
+  exceeding actual disk capacity (#484).
+
+## [0.34.1] - 2026-05-07
+
+### Fixed
+- **Sidebar** — all groups now start collapsed on launch instead of expanded,
+  reducing visual clutter (#482).
+- **Speed Test** — swapped card order: Ookla (primary) now appears first,
+  HTTP (backup) second (#485).
+- **App Updates** — per-package upgrade now includes `--include-unknown` flag
+  so packages with undetermined versions can be upgraded (#486).
+- **Uninstaller** — blank entries with empty names are now filtered out of
+  the installed applications list (#487).
+- **About** — "View license" button no longer appears grayed out; changed
+  from GhostButton to SecondaryButton style (#490).
+
+## [0.34.0] - 2026-05-07
+
+### Added
+- **App Blocker** — fully implemented tab replacing the WIP placeholder.
+  Blocks applications from executing using Image File Execution Options (IFEO)
+  registry mechanism. Enter an exe name or browse for a file, confirm, and the
+  app is prevented from launching. Fully reversible — unblock restores normal
+  execution. Shows list of currently blocked apps with select/deselect.
+- `AppBlockerService` — IFEO-based block/unblock with specific exception
+  handling, admin privilege detection, and GetBlockedApps enumeration.
+- `AppBlockerViewModel` — block, unblock selected, browse, refresh, select all.
+- `BlockedApp` model with observable properties.
+- `AppBlockerView` XAML with input field, toolbar, and DataGrid.
+- Unit tests for ViewModel and Model.
+
+## [0.33.0] - 2026-05-07
+
+### Added
+- **App Alerts** — fully implemented tab replacing the WIP placeholder.
+  Monitors Program Files, AppData\Programs, and registry uninstall keys for
+  new application installations using FileSystemWatcher and periodic registry
+  polling. Shows timestamped install history with app name, publisher, path,
+  and detection source. Start/stop monitoring, acknowledge alerts, show all
+  currently installed apps, clear history.
+- `AppAlertService` — FileSystemWatcher on install directories + 30s registry
+  poll cycle. Thread-safe with ConcurrentDictionary baseline.
+- `AppAlertsViewModel` — full MVVM with start/stop, acknowledge, clear,
+  refresh installed apps.
+- `AppInstallEntry` model with observable properties.
+- `AppAlertsView` XAML with DataGrid and toolbar.
+- Unit tests for ViewModel and Model.
+
+## [0.32.0] - 2026-05-06
+
+### Added
+- **Shortcut Cleaner** — fully implemented tab replacing the WIP placeholder.
+  Scans Desktop, Start Menu, Quick Launch, and Recent Items for broken .lnk
+  shortcuts whose targets no longer exist. Lists results with name, location,
+  and missing target path. Supports select all/deselect, move to Recycle Bin
+  or permanent delete, with confirmation dialog before any deletion.
+- `ShortcutCleanerService` — COM-based IShellLink resolution, SHFileOperation
+  for Recycle Bin support, scans 6 common shortcut locations.
+- `ShortcutCleanerViewModel` — full MVVM implementation with scan, delete,
+  select/deselect, cancel, and OperationLockService integration.
+- `BrokenShortcut` model with observable properties.
+- `ShortcutCleanerView` XAML with DataGrid, toolbar, and status footer.
+- Unit tests for ViewModel and Model.
+
+## [0.31.0] - 2026-05-06
+
+### Added
+- **Process Description Database** — built-in JSON database with 107 common
+  Windows processes and popular applications, each with a plain-language
+  description, category (System, Browser, Development, Communication, Media,
+  Gaming, Graphics, Productivity, Creative, Cloud, Utility, Network, Security),
+  and safety indicator (System, Trusted, Unknown).
+- **ProcessDescriptionService** — singleton service that loads the embedded
+  JSON database and provides fast case-insensitive lookup by process name.
+- **ProcessEntry model** — extended with `PlainDescription`, `Category`, and
+  `SafetyLevel` fields populated from the database on each refresh.
+- **Enhanced filtering** — Process Manager search now matches against
+  plain description and category in addition to name and PID.
+- Unit tests for `ProcessDescriptionService` covering lookup, case
+  insensitivity, .exe stripping, categories, and safety levels.
+
+## [0.30.0] - 2026-05-06
+
+### Added
+- **Operation Lock Service** — new `OperationLockService` singleton that
+  prevents conflicting concurrent operations across tabs. Operations are
+  grouped by category (Disk, Network, SystemModification). If a user tries
+  to start a conflicting operation while another is running, the UI shows
+  which operation is blocking and refuses to start the new one.
+- Integrated operation locks into: `DeepCleanupViewModel` (scan, clean,
+  large file scan), `DiskAnalyzerViewModel` (analyze), `DuplicateFileViewModel`
+  (scan), `CleanupViewModel` (temp cleanup), `SpeedTestViewModel` (HTTP and
+  Ookla tests), `TracerouteViewModel` (trace), `NetworkRepairViewModel`
+  (all repair operations).
+- Unit tests for `OperationLockService` covering acquire, release, conflict
+  detection, thread safety, and double-dispose safety.
+
+## [0.29.1] - 2026-05-06
+
+### Fixed
+- **Code quality** — replaced 8 generic `catch (Exception)` blocks with
+  specific exception types in `AppUpdatesViewModel`, `DashboardViewModel`,
+  and `LogsViewModel`. No behavior change — same error messages, but now
+  CodeQL-clean and explicit about what can fail.
+
+## [0.29.0] - 2026-05-06
+
+### Added
+- **Sidebar restructure** — reorganized navigation from 7 groups / 21 tabs to
+  9 groups / 36 tabs. New groups: **Monitor** (Process Manager moved here,
+  plus Resource History, App Alerts, Privacy Monitor placeholders) and
+  **Control** (Privacy Settings, Context Menu, Restore Points, Scheduled
+  Maintenance, System Report placeholders). Existing groups expanded: System
+  (+Windows Features), Cleanup (+Shortcut Cleaner, File Shredder), Network
+  (+DNS Changer, Hosts Editor), Apps (+Bulk Installer, App Blocker).
+- **PlaceholderView** — generic WIP view showing feature name, description,
+  issue reference, and "Work in Progress" badge for planned tabs.
+- **PlaceholderViewModel** — lightweight ViewModel for placeholder tabs,
+  stores feature name, description, and issue number.
+
+## [0.28.34] - 2026-05-06
+
+### Removed
+- **Dead code** — removed legacy `NetworkViewModel.cs` (superseded by split
+  ViewModels: PingViewModel, TracerouteViewModel, SpeedTestViewModel,
+  NetworkRepairViewModel + NetworkSharedState). Removed associated integration
+  tests that exercised the dead class.
+
+## [0.28.33] - 2026-05-06
+
+### Fixed
+- **Code quality** — resolved `cs/missed-using-statement` CodeQL alert in
+  `ProcessManagerService`: wrapped `Process.GetProcesses()` array in
+  try/finally to guarantee disposal of all process handles, even on early
+  cancellation.
+
+## [0.28.32] - 2026-05-06
+
+### Fixed
+- **Code quality** — resolved final 5 CodeQL alerts: replaced `foreach`+
+  `ContainsKey` guard with `TryAdd` in `UninstallerService`, converted
+  `foreach`+immediate-map to LINQ `.Select()` in `NetworkSharedState` and
+  `IconExtractorService` (×2), added logging to previously empty catch block
+  in `StartupService`.
+
+## [0.28.31] - 2026-05-06
+
+### Fixed
+- **Code quality** — resolved 2 additional CodeQL alerts: converted
+  `foreach`+immediate-map to `.Select()` in `DriversViewModel`, converted
+  `foreach`+type-check to `.Where()` in `StartupService.ReadApprovedKey`.
+
+## [0.28.30] - 2026-05-06
+
+### Fixed
+- **Code quality** — resolved 40 CodeQL alerts across 16 files: replaced
+  `Path.Combine` with `Path.Join` to prevent silent argument dropping (18),
+  converted `foreach`+`if continue` to LINQ `.Where()` (17), replaced
+  `foreach`+immediate-map to `.Select()` (3), added comments to intentional
+  empty catch blocks (2).
+
+## [0.28.29] - 2026-05-05
+
+### Fixed
+- **Logs / Console** — replaced generic `catch (Exception)` with specific
+  exception types in `LogsViewModel` and `ConsoleViewModel` (resolves
+  CodeQL catch-of-all-exceptions alerts).
+
+## [0.28.28] - 2026-05-05
+
+### Fixed
+- **Cleanup** — SFC and DISM scans no longer crash with "No data is available
+  for encoding 437" on systems where the OEM code page is not registered;
+  falls back to UTF-8 (same fix as #443 applied to remaining callers).
+- **App Updates** — winget upgrade now accepts package IDs with spaces (same
+  fix as #444 applied to WingetService).
+- **Code quality** — replaced bare `catch { }` with specific exception types
+  in DiskHealthService, FixedDriveService, MemoryTestService, SystemInfoService,
+  and AdminHelper (resolves multiple CodeQL alerts).
+- **SECURITY.md** — updated supported version table from 0.5.x to 0.28.x.
+- **ARCHITECTURE.md** — removed stale tab counts from group headers.
+
+## [0.28.27] - 2026-05-05
+
+### Fixed
+- **System Health** — chkdsk scan no longer crashes with "No data is available
+  for encoding 437" on systems where the OEM code page is not registered;
+  falls back to UTF-8 gracefully (#443).
+- **Uninstaller** — packages with spaces in their winget ID (e.g. "Riot
+  Games.League of Legends") can now be uninstalled without "Invalid package
+  ID" error (#444).
+
+## [0.28.26] - 2026-05-04
+
+### Fixed
+- **CodeQL regressions** — resolved 2 alerts introduced during the bug fix
+  session: converted `foreach`+`if` to LINQ `Where()` in
+  `DeepCleanupService.RiotLogDirs` (missed-where), wrapped `JsonDocument` in
+  `using` block in `SpeedTestService.RunOoklaAsync` (missed-using).
+
+## [0.28.25] - 2026-05-04
+
+### Fixed
+- **Accessibility: LogsView** — replaced remaining search emoji (🔍) in the
+  no-results overlay with Segoe MDL2 Assets glyph (E721). Missed in the
+  initial accessibility pass (#411).
+
+## [0.28.24] - 2026-05-04
+
+### Fixed
+- **Accessibility** — replaced emoji characters (📁🔍✕📂📋🗑⟳↺⬆) with text
+  equivalents across all 21 XAML views; added `AutomationProperties.Name` to
+  all DataGrid and ProgressBar elements for screen reader support (#411).
+
+## [0.28.23] - 2026-05-04
+
+### Fixed
+- **Services: timeout handling** — `WaitForStatus` in `ServiceManagerService`
+  now catches `TimeoutException` and converts to a descriptive error instead
+  of crashing when a service takes longer than 30 seconds (#414).
+- **Performance: snapshot persistence** — `OriginalSnapshot` is now saved to
+  JSON in `%LOCALAPPDATA%\SysManager` and loaded on startup, so Restore All
+  works after app restart (#415).
+- **Traceroute: DNS race condition** — reverse DNS lookup is now awaited with
+  a 1.5 s timeout before emitting the hop, so hostnames appear immediately
+  in the UI instead of showing `*` (#416).
+
+## [0.28.22] - 2026-05-04
+
+### Fixed
+- **Update download: SHA256 verification** — added `VerifyHashAsync` to
+  `UpdateService` that downloads the `.sha256` file from the GitHub release
+  and compares against the local file hash (#408).
+- **Speed Test: Ookla integrity check** — Ookla CLI download now computes
+  SHA256 (logged for audit), validates the zip is not corrupt, and verifies
+  it contains `speedtest.exe` before extraction (#409).
+
+## [0.28.21] - 2026-05-04
+
+### Fixed
+- **Performance: audit logging** — all registry modifications in
+  `PerformanceService` (Game Mode, Xbox Game Bar, GPU, visual effects) now
+  log key path, action, and new value via Serilog (#405).
+- **Error messages: operation context** — replaced 38+ generic `Error: …`
+  messages in `PerformanceViewModel`, `ServicesViewModel`, and
+  `SystemHealthViewModel` with operation-specific context like
+  "Power plan change failed:" and "Start service failed:" (#407).
+
+## [0.28.20] - 2026-05-04
+
+### Fixed
+- **Deep Cleanup: drive scanning** — Riot Games / League of Legends log
+  paths now scan all fixed drives instead of only Program Files (#401).
+- **Icon cache: eviction** — `IconExtractorService` cache now has a
+  configurable `MaxCacheSize` (default 500) with automatic eviction to
+  prevent unbounded memory growth (#402).
+- **ConfigureAwait(false)** — added to all async calls in
+  `PerformanceService`, `UninstallerService`, and `WingetService` to
+  prevent potential UI deadlocks (#403).
+
+## [0.28.19] - 2026-05-04
+
+### Fixed
+- **Speed Test: JSON error handling** — `SpeedTestService.RunOoklaAsync`
+  now catches `JsonException` and `KeyNotFoundException` when Ookla CLI
+  returns malformed output (#400).
+
+## [0.28.18] - 2026-05-04
+
+### Fixed
+- **Input validation: allowlist regex** — `UninstallerService` and
+  `WingetService` now validate package IDs with an allowlist regex
+  (`[a-zA-Z0-9._-/+]`, max 256 chars) instead of a blocklist (#397).
+- **Null checks: verified safe** — confirmed all `OpenSubKey` calls and
+  Process API access already have proper null checks (#398).
+
+## [0.28.17] - 2026-05-04
+
+### Fixed
+- **CTS disposal** — added `Dispose(bool)` override to 8 ViewModels that
+  had `CancellationTokenSource` fields but no cleanup: `AppUpdatesVM`,
+  `DiskAnalyzerVM`, `DriversVM`, `DuplicateFileVM`, `LogsVM`,
+  `SpeedTestVM`, `TracerouteVM`, `UninstallerVM` (#396).
+- **UpdateService: bare catch** — replaced bare `catch` blocks in
+  `GetRecentAsync` and `DownloadAsync` with specific exception types
+  (`HttpRequestException`, `JsonException`, `IOException`) plus Serilog
+  logging (#413).
+
+## [0.28.16] - 2026-05-04
+
+### Fixed
+- **Dispose lifecycle** — `MainWindow.OnClosed` now disposes
+  `MainWindowViewModel`, which chains to all child ViewModels and
+  `NetworkSharedState`. `NetworkViewModel` disposes its CTS, unsubscribes
+  events, and stops the pinger (#395, #410).
+
+## [0.28.15] - 2026-04-30
+
+### Fixed
+- **CodeQL: empty-catch-block** — added Serilog logging or descriptive comments
+  to ~50 empty catch blocks across 10 files: `IconExtractorService`,
+  `DiskAnalyzerService`, `DuplicateFileService`, `ProcessManagerService`,
+  `SpeedTestService`, `StartupService`, `UninstallerService`,
+  `CleanupViewModel`, `DiskAnalyzerViewModel`, `DuplicateFileViewModel`.
+- **CodeQL: catch-of-all-exceptions** — replaced bare `catch { }` in
+  `DiskAnalyzerService` (7 blocks) with specific `UnauthorizedAccessException`
+  and `IOException`; replaced `catch (Exception)` in `DiskAnalyzerViewModel`
+  and `DuplicateFileViewModel` with specific types.
+- **CodeQL: missed-where** — converted `ShouldSkip`/`ShouldSkipDir`/
+  `ShouldSkipFile` foreach loops to LINQ `Any()` in `DiskAnalyzerService`
+  and `DuplicateFileService`.
+
+## [0.28.14] - 2026-04-30
+
+### Fixed
+- **CodeQL: missed-using-statement** — `ServiceController` objects in
+  `ServiceManagerService.GetAllServices()` and `Process` objects in
+  `PerformanceService.TrimWorkingSets()` now use `using` blocks instead of
+  manual `try/finally Dispose()`.
+
+## [0.28.13] - 2026-04-30
+
+### Fixed
+- **CodeQL: DuplicateFileService catch blocks** — bare `catch { }` in file
+  discovery, partial hash, and full hash loops replaced with specific
+  `IOException` + `UnauthorizedAccessException`.
+- **CodeQL: App.xaml.cs using statement** — `Process` objects in single-instance
+  activation now use `using` block instead of manual try/finally dispose.
+- **CodeQL: App.xaml.cs static field** — `_instanceMutex` changed from static
+  to instance field (only one App instance exists per process).
+- **CodeQL: StartupService unused variables** — removed unused `actions`
+  variable; stdout drain changed to discard pattern.
+
+## [0.28.12] - 2026-04-30
+
+### Fixed
+- **CodeQL: catch-of-all-exceptions** — replaced all `catch (Exception)` and
+  bare `catch { }` with specific exception types across 12 files: AboutVM,
+  BatteryHealthVM, CleanupVM, DeepCleanupVM, NetworkVM, PerformanceVM,
+  ProcessManagerVM, ServicesVM, StartupVM, SystemHealthVM, WindowsUpdateVM,
+  ProcessManagerService. Exception types include `InvalidOperationException`,
+  `IOException`, `HttpRequestException`, `ManagementException`,
+  `Win32Exception`, `TaskCanceledException`, and others.
+- **CodeQL: empty catch blocks** — added Serilog logging to previously silent
+  catch blocks so failures are traceable in diagnostics.
+
+## [0.28.11] - 2026-04-30
+
+### Fixed
+- **ViewModel lifecycle: IDisposable** — `ViewModelBase` now implements
+  `IDisposable` with virtual `Dispose(bool)` pattern. All ViewModels with
+  event subscriptions or CancellationTokenSources override Dispose to clean up.
+- **Event handler leaks** — lambda event handlers in CleanupVM, SystemHealthVM,
+  and WindowsUpdateVM replaced with named methods and unsubscribed in Dispose.
+- **Fire-and-forget error handling** — 11 ViewModels with `_ = InitAsync()`
+  wrapped in try/catch with `Log.Warning` to prevent unobserved task exceptions.
+- **CTS disposal in Dispose** — CleanupVM (4×), DeepCleanupVM (3×),
+  SystemHealthVM, WindowsUpdateVM now dispose CancellationTokenSources on
+  ViewModel teardown.
+
+## [0.28.10] - 2026-04-30
+
+### Fixed
+- **Critical: deadlock in StartupService** — `Process.WaitForExit()` called
+  before reading stderr/stdout caused pipe buffer deadlock on schtasks.exe.
+  Now reads streams asynchronously before waiting.
+- **Critical: COM object leak in StartupService** — `WScript.Shell` and
+  shortcut COM objects were not released, leaking COM references. Added
+  `Marshal.ReleaseComObject` in finally block.
+- **Critical: 50 MB allocation in SpeedTestService** — upload test allocated
+  a single 50 MB byte array on the Large Object Heap. Replaced with streaming
+  `RandomChunkStream` using 256 KB chunks.
+- **Input validation** — schtasks, sc.exe, and winget arguments now validated
+  against injection characters (`"`, `\0`) in StartupService,
+  ServiceManagerService, UninstallerService, and WingetService.
+- **Bare catch blocks** — 7 bare catches in StartupService, SpeedTestService,
+  ServiceManagerService, UninstallerService, and WingetService replaced with
+  specific exception types and Serilog logging.
+
+## [0.28.9] - 2026-04-30
+
+### Fixed
+- **Cleanup: CancellationTokenSource disposal** — `_tempCts`, `_binCts`,
+  `_sfcCts`, and `_dismCts` were not disposed before recreation, leaking
+  handles on repeated Clean TEMP / Empty Recycle Bin / SFC / DISM operations.
+  Now follows the same `_cts?.Dispose()` pattern applied in other ViewModels
+  during the #161 memory leak fix.
+
+## [0.28.8] - 2026-04-29
+
+### Fixed
+- **Process Manager: Open file location disabled for system processes** — button
+  was active but non-functional for processes without an accessible file path.
+  Now disabled with a tooltip when the path doesn't exist (#100).
+
+### Added
+- **Process Manager: Show only apps toggle** — checkbox in the toolbar filters
+  out system processes and shows only applications with a visible window,
+  reducing the list from 200+ entries to just user-facing apps (#100).
+
+## [0.28.7] - 2026-04-29
+
+### Fixed
+- **Memory leak: CancellationTokenSource disposal** — previous CTS instances
+  were not disposed before creating new ones across 8 ViewModels (15 locations),
+  causing WaitHandle accumulation during extended use. Affected: Windows Update,
+  Uninstaller, System Health, Drivers, App Updates, Logs, Duplicate Finder,
+  Disk Analyzer (#161).
+- **Memory leak: Process object disposal** — `Process.GetProcessesByName()` and
+  `GetCurrentProcess()` results in `App.ActivateExistingInstance` were not
+  disposed, leaking OS handles (#161).
+- **Memory leak: PropertyChanged event handlers** — anonymous lambdas subscribed
+  to `target.PropertyChanged` in the Network tab were never unsubscribed when
+  targets were removed, preventing garbage collection of removed targets (#161).
+
+## [0.28.6] - 2026-04-29
+
+### Fixed
+- **Startup Manager: crash when scrolling** — WPF DataGrid virtualization
+  passed internal placeholder objects to command handlers, crashing the app.
+  Commands now accept `object?` with pattern matching (#326).
+- **About: What's New raw markdown** — release notes were displayed as plain
+  text. Added a lightweight markdown-to-Inlines renderer that formats headings,
+  bold, bullets, and inline code (#335).
+- **System Health: chkdsk false errors** — verdict relied solely on exit code,
+  which is non-zero even on healthy volumes. Now parses chkdsk output text for
+  known healthy/error patterns (#323).
+- **Quick Cleanup: Rescan not updating** — property changes fired from a
+  background thread inside Task.Run. Refactored to set ObservableProperties on
+  the UI thread after await (#327).
+- **Deep Cleanup: sidebar progress missing** — IsBusy was never set. Added
+  forwarding from IsScanning/IsCleaning/IsLargeScanning to IsBusy (#328).
+- **Disk Analyzer: duplicate progress indicator** — removed the redundant
+  background task tray entry; the NavItem slim bar is sufficient (#329).
+- **Ping: unreachable targets** — replaced 5 unreachable CS2 Europe IPs and
+  removed 3 unreachable FACEIT IPs. All new IPs verified with ICMP ping
+  (#330, #331, #332).
+- **Traceroute: chart not rendering** — LiveChartsCore CartesianChart collapsed
+  to zero height. Added MinHeight=250 (#333).
+- **Speed Test: HTTP values too low** — increased parallel streams from 4 to 8
+  and payload from 25 MB to 50 MB to saturate 1 Gbps+ links (#334).
+
+## [0.28.1] - 2026-04-29
+
+### Fixed
+- **Startup Manager no longer crashes when scrolling the list** — fixed a DataGrid virtualization crash while scrolling the Startup Manager entries (#337).
+
+## [0.28.0] - 2026-04-28
+
+### Changed
+- **Windows Update: structured DataGrid** — the Windows Update tab now displays
+  updates in a sortable DataGrid table (Title, KB, Size, Status, Date, Category)
+  instead of raw console text. Console output is hidden behind a collapsible
+  panel, shown only during Install/Pending Reboot operations (#305, #240).
+
+## [0.27.0] - 2026-04-28
+
+### Changed
+- **Drivers: structured DataGrid** — the Drivers tab now displays installed
+  drivers in a sortable DataGrid table (Device Name, Manufacturer, Version,
+  Date) instead of raw console text. Click column headers to sort (#304).
+
+## [0.26.0] - 2026-04-28
+
+### Added
+- **Sidebar busy indicator** — every tab now shows a slim indeterminate progress
+  bar under its name in the sidebar when performing a long-running operation.
+  Works automatically for all tabs via ViewModelBase.IsBusy (#263).
+
+## [0.25.0] - 2026-04-28
+
+### Added
+- **Ping: more targets per region** — CS2 Europe expanded from 4 to 10 targets
+  (2 IPs per region + Frankfurt, Spain subnets). FACEIT Europe expanded from 5
+  to 8 targets (3× Germany, 2× Netherlands, Sweden, UK, France). A single
+  server going down no longer shows the entire region as failed (#285, #259).
+
+## [0.24.0] - 2026-04-28
+
+### Changed
+- **Clickable column headers** — all table tabs now use DataGrid with native
+  click-to-sort column headers (ascending/descending toggle), replacing
+  standalone sort buttons and dropdowns. Consistent with Windows Task Manager
+  behavior.
+  - **Process Manager**: sortable PID, Name, Memory, CPU%, Threads, Status (#266)
+  - **Uninstaller**: sortable Name, Size, Version, Publisher, Source, Status (#254)
+  - **Services**: removed redundant Sort ComboBox, column headers handle sorting
+  - **Startup Manager**: sortable Name, Publisher, Status (previously had no sort)
+  - **App Updates**: sortable Name, Id, Current, Available, Source, Status
+    (previously had no sort)
+
+## [0.23.0] - 2026-04-28
+
+### Changed
+- **Sidebar readability** — improved font contrast and size for group headers,
+  subtitles, and child count badges. TextMuted → TextSecondary, larger font
+  sizes, higher opacity (#265).
+
+## [0.22.0] - 2026-04-28
+
+### Changed
+- **Removed MemTest86 external reference** — the MemTest86 button, command, and all
+  references have been removed from System Health. SysManager no longer references
+  external third-party tools. The built-in Windows Memory Diagnostic remains (#271).
+
+## [0.21.9] - 2026-04-27
+
+### Fixed
+- **SFC/DISM elevation consent** — SFC and DISM no longer auto-relaunch the
+  application with admin privileges. A Yes/No confirmation dialog is now shown
+  before any elevation. If the user declines, the operation is cancelled with a
+  clear status message (#264).
+
+## [0.21.8] - 2026-04-27
+
+### Fixed
+- **chkdsk admin check** — chkdsk /scan now checks for admin privileges before
+  running. Without elevation, drives show "Needs admin" status with a clear
+  message instead of failing with cryptic exit codes (#270).
+
+## [0.21.7] - 2026-04-27
+
+### Fixed
+- **UI freeze on Cleanup scan** — separated PropertyChanged event wiring from
+  collection population to reduce per-item UI re-renders (#261).
+- **UI freeze on Speed Test** — offloaded synchronous file-system I/O and
+  process creation in the Ookla speed test to the thread pool (#258).
+- **UI freeze on Drivers** — offloaded Process.Start() and PowerShell runspace
+  initialization to the thread pool so the dispatcher is never blocked (#249).
+
+## [0.21.6] - 2026-04-27
+
+### Fixed
+- **Speed Test panels independent** — each panel (HTTP / Ookla) now shows its own
+  status text, progress bar, and cancel button only while that specific test runs.
+  Previously starting one test would display status on both panels (#257).
+- **Traceroute auto-trace** — Start Auto-Trace now adds the current host to the
+  monitor and runs an initial trace immediately. Previously the monitor had no
+  targets when started from the Traceroute tab (#239).
+
+## [0.21.5] - 2026-04-27
+
+### Fixed
+- **Startup Manager disable** — entries from the shell Startup folder can now be
+  properly disabled. Previously they were incorrectly routed to
+  `StartupApproved\Run` instead of `StartupApproved\StartupFolder`, so Windows
+  never saw the change (#268).
+
+## [0.21.4] - 2026-04-27
+
+### Fixed
+- **Tab name consistency** — all sidebar labels now match their tab headers exactly.
+  Adopted descriptive naming throughout: Process Manager, Startup Manager, System
+  Logs, Performance Mode, Battery Health, Network Repair, Duplicate Finder, Quick
+  Cleanup, Deep Cleanup (#267).
+- **System Logs hover highlight** — log entry rows now show a subtle background
+  change on mouse hover, consistent with other tabs (#247).
+
+## [0.21.3] - 2026-04-27
+
+### Fixed
+- **Buttons grayed out on focus loss** — intercepted `WM_NCACTIVATE` to keep the
+  window chrome rendering as active at all times. ModernWPF was dimming controls
+  when the window lost focus, making buttons appear disabled across the entire
+  application (#252, #251, #248, #245).
+
+## [0.21.2] - 2026-04-26
+
+### Fixed
+- **Startup toggle not working** — clicking the checkbox to disable a startup app
+  (e.g. MEGAsync) appeared to do nothing. Root cause: WPF CheckBox two-way binding
+  flipped `IsEnabled` before the command ran, then the command inverted it back.
+  Now uses the already-flipped value as the desired state and reverts on failure.
+
+## [0.21.1] - 2026-04-26
+
+### Fixed
+- **Icon extraction quality** — drastically improved icon resolution for all three
+  tabs (Startup, Uninstaller, Process Manager):
+  - Contextual fallback icons: Windows shield for system processes, gear for services,
+    generic app icon for unknown apps (no more blank squares)
+  - Deeper path resolution: handles rundll32 (extracts DLL target), msiexec, searches
+    PATH, Program Files, and App Paths registry
+  - Process Manager: finds exe by process name when FilePath is empty (access denied)
+  - Uninstaller: scans HKCU registry for per-user installs (Discord, VS Code, Spotify)
+    and searches InstallLocation for exe when DisplayIcon is missing
+
+## [0.21.0] - 2026-04-25
+
+### Added
+- **Application icons** — Startup Manager, Uninstaller, and Process Manager now
+  show the real application icon (extracted from the exe) next to each app name.
+  Uses Shell32 `SHGetFileInfo` with a concurrent cache for performance. Falls back
+  to a generic icon when the exe is missing, inaccessible, or a UWP/system process
+  (#229).
+
+## [0.20.0] - 2026-04-25
+
+### Added
+- **FACEIT Europe ping preset** — 5 EU server locations (Germany, UK, France,
+  Netherlands, Sweden) for checking latency to FACEIT CS2 competitive servers.
+  Appears in the preset dropdown between CS2 Europe and PUBG Europe (#228).
+
+## [0.19.0] - 2026-04-25
+
+### Added
+- **Network split** — the monolithic `NetworkViewModel` (~700 lines) is now split
+  into 4 focused ViewModels with separate Views:
+  - `PingViewModel` + `PingView` — live ping, targets, presets, latency chart,
+    health verdict
+  - `TracerouteViewModel` + `TracerouteView` — auto-traceroute + manual trace
+    with dedicated Start/Stop buttons (previously only available on Ping)
+  - `SpeedTestViewModel` + `SpeedTestView` — HTTP + Ookla speed tests
+  - `NetworkRepairViewModel` + `NetworkRepairView` — DNS flush, Winsock reset,
+    TCP/IP reset
+- **NetworkSharedState** — shared state class for targets, buffers, pinger,
+  tracer, and health diagnostic, consumed by all 4 network ViewModels.
+- **Sidebar visual hints** on collapsed groups:
+  - Child count badge next to label (e.g. "System (6)")
+  - Subtitle with abbreviated child labels (auto-hides when expanded)
+  - Tooltip with full child labels on hover
+- 30+ new unit tests for NetworkSharedState, PingViewModel,
+  TracerouteViewModel, SpeedTestViewModel, NetworkRepairViewModel, NavGroup.
+
+### Changed
+- **Windows Update** moved from Apps → System group (System now has 6 children).
+- **Apps group** reduced to 2 children (App updates + Uninstaller).
+- **Network group** expanded from 1 to 4 sidebar children (no longer a
+  single-item flat entry).
+- Sidebar now shows 21 leaf items across 7 groups (was 18).
+
+## [0.18.0] - 2026-04-25
+
+### Added
+- **Sidebar tab reorganization** — the 18 flat sidebar tabs are now grouped into
+  7 collapsible categories: Dashboard, System, Cleanup, Storage, Network, Apps,
+  and Info. Groups expand/collapse with a click. Single-item groups (Dashboard,
+  Network) render as flat top-level entries without expander chrome (#82).
+- **NavGroup model** — new `NavGroup` class for collapsible sidebar categories
+  containing child `NavItem` entries.
+
+### Changed
+- **Large File Finder** — conceptually moved from the Deep Cleanup group to the
+  Storage group, alongside Disk Analyzer and Duplicates. This resolves the
+  confusion about where to find storage analysis tools (#98).
+- **Cleanup tab** renamed to "Quick cleanup" in the sidebar to distinguish it
+  from the Cleanup group header.
+- **Sidebar rendering** — replaced the flat `ListBox` with a grouped
+  `ItemsControl` + `Expander` tree layout. Active-mark accent bar and hover
+  states preserved.
+- **UI test infrastructure** — `AppFixture.GoToTab` updated to find nav items
+  by `AutomationProperties.AutomationId` anywhere in the visual tree instead
+  of requiring a `NavList` ListBox.
+
+## [0.17.0] - 2026-04-25
+
+### Added
+- **Application logging** — structured Serilog logging across all 16 ViewModels.
+  Logs now capture tab navigation, operation completion (cleanup, scan, upgrade,
+  speed test, disk analysis, etc.), system state changes (power plan, Game Mode,
+  services, startup entries), admin elevation events, and error context. Privacy-safe:
+  no PII, IPs, file paths, or hostnames are logged — only operation names, counts,
+  and metrics (#95).
+- **LogService.SanitizePath** — helper method that strips Windows usernames from
+  file paths as a safety net for any future path logging.
+
+## [0.16.1] - 2026-04-25
+
+### Fixed
+- **Network / Ping** — latency chart no longer freezes when switching away from the
+  Ping sub-tab and returning; LiveCharts2 series are nudged on tab re-entry (#153).
+- **Network / Navigation** — switching between Network and Services tabs during
+  concurrent background scans no longer throws a cross-thread exception; collection
+  updates are now dispatched to the UI thread (#154).
+- **Network / Speed test** — HTTP download test now uses 4 parallel connections to
+  saturate the link, producing results closer to Ookla/fast.com benchmarks (#152).
+
+## [0.16.0] - 2026-04-25
+
+### Added
+- **Logs tab** — relative timestamps ("2h ago", "3d ago") in the event list with
+  full timestamp on hover; quick time-range pill buttons (1h / 24h / 7d / 30d / All)
+  replacing the dropdown; search placeholder watermark; no-results empty state with
+  helpful message when filters match nothing (#83).
+- **System Health** — disk health cards now show a computed health percentage
+  (0–100%) with colored gauge bar, temperature gauge with color thresholds,
+  life-remaining gauge (inverted wear), and friendly power-on time formatting
+  (days/years instead of raw hours) (#143).
+
+## [0.15.1] - 2026-04-25
+
+### Fixed
+- **Uninstaller** — empty status badges no longer render for apps without a
+  status; FlexVis converter now treats empty/whitespace strings as Collapsed (#130).
+- **Uninstaller** — ARP-only apps show yellow "Local" tag with tooltip; status
+  badge column widened for less truncation (#131).
+
+### Changed
+- **Uninstaller / Process Manager** — "Filter:" label renamed to "Search:" with
+  placeholder hint text (#130).
+
+## [0.15.0] - 2026-04-25
+
+### Added
+- **Sidebar** — SFC /scannow, DISM RestoreHealth, and chkdsk now show progress
+  indicators in the left sidebar mini-tray alongside existing background task
+  indicators (#146, #149, #156).
+
+## [0.14.0] - 2026-04-25
+
+### Added
+- **Cleanup** — SFC /scannow and DISM /RestoreHealth now parse output into
+  color-coded verdicts: green (healthy), yellow (repaired), red (failed) (#148).
+- **Uninstaller** — application size displayed from registry EstimatedSize;
+  sort by Name, Size, or Publisher (#139).
+- **Process Manager** — CPU usage percentage measured and displayed; sort by
+  CPU added alongside Memory, Name, PID (#78).
+- **About** — "Copy environment info" now includes CPU, RAM, GPU, storage,
+  and display diagnostics similar to DxDiag (#84).
+
+### Changed
+- **Sidebar** — fixed duplicate icons: Processes and Uninstaller now have
+  unique Segoe Fluent Icons (#138).
+
+## [0.13.14] - 2026-04-25
+
+### Fixed
+- **SFC / DISM / chkdsk** — live output no longer appears corrupted. Added
+  optional encoding parameter to `PowerShellRunner.RunProcessAsync`; system
+  tools now use the OEM code page instead of UTF-8 (#147, #150, #157).
+
+## [0.13.13] - 2026-04-25
+
+### Fixed
+- **Network** — speed test loading indicator now only appears on the panel that
+  is actually running (HTTP or Ookla), not both simultaneously (#151).
+
+## [0.13.12] - 2026-04-25
+
+### Fixed
+- **Network** — tab content now follows the dark theme. Set transparent
+  background on CartesianChart controls and added global TabControl style to
+  prevent light-mode bleed-through (#140).
+
+## [0.13.11] - 2026-04-25
+
+### Fixed
+- **Drivers** — added sorting options (Name, Manufacturer, Version, Date) via
+  ComboBox in the toolbar. Modernized view layout with Card borders and
+  consistent typography. Replaced generic catch with specific exceptions (#155).
+
+## [0.13.10] - 2026-04-25
+
+### Fixed
+- **DataGrid styling** — added global dark-friendly styles for DataGrid, column
+  headers, rows, and cells. Rows now use transparent default with Surface1
+  alternating, Surface2 hover, Surface3 selected. Text stays readable in all
+  states (#136).
+- **Deep Cleanup** — clicking the "Show" button in the large files DataGrid no
+  longer highlights the entire cell. Custom DataGridCell template removes the
+  default focus/selection highlight (#158).
+
+## [0.13.9] - 2026-04-25
+
+### Fixed
+- **Buttons** — buttons across the application no longer become invisible when
+  hovered, focused, or navigated via keyboard. Added explicit Foreground binding
+  on ContentPresenter and keyboard focus trigger with accent border (#145).
+- **About tab** — "View license" button text no longer clips or disappears on
+  hover/focus (#162).
+
+## [0.13.8] - 2026-04-25
+
+### Fixed
+- **Startup Manager** — toggle now works for Task Scheduler entries via
+  `schtasks.exe /Change`. Previously threw `NotSupportedException` silently
+  (#160).
+- **Startup Manager** — replaced generic "Error — may need admin" message with
+  specific error descriptions (`SecurityException`, `UnauthorizedAccessException`,
+  `IOException`). Error messages now describe the actual failure (#159).
+- **Tests** — fixed flaky `PreScan_EventuallyPopulatesLabels` test by replacing
+  fixed 3s delay with polling loop (up to 15s).
+
+## [0.13.7] - 2026-04-25
+
+### Fixed
+- **Uninstaller** — error messages are no longer truncated. Added ToolTip on
+  status badge for full text on hover, TextTrimming for graceful truncation, and
+  widened status column from 90px to 160px (#163).
+
+## [0.13.6] - 2026-04-25
+
+### Fixed
+- **Release workflow** — fixed `Rename-Item` in release.yml that was passing a
+  full path instead of just the new filename, causing v0.13.3–v0.13.5 releases
+  to fail.
+
+## [0.13.5] - 2026-04-25
+
+### Fixed
+- **App Updates** — checkbox column alignment corrected; increased width and
+  centered the checkbox to prevent clipping on the right side.
+
+## [0.13.4] - 2026-04-25
+
+### Fixed
+- **Services tab** — sorting buttons now actually sort the service list. Added
+  SortBy property with options (Name, Status, Startup, Recommendation) and a
+  sort ComboBox in the toolbar.
+- **Cleanup tab** — added auto-rescan after cleaning temp files or emptying the
+  Recycle Bin so size labels refresh immediately. Added an explicit Rescan button.
+
+## [0.13.3] - 2026-04-25
+
+### Fixed
+- **About tab** — "Copy environment info" now shows a friendly Windows name
+  (e.g. "Microsoft Windows 11 Pro (build 26200)") instead of the raw NT version
+  string. Uses WMI `Win32_OperatingSystem.Caption` with fallback.
+
+## [0.13.2] - 2026-04-25
+
+### Fixed
+- **Single instance** — the application now prevents multiple instances from
+  running simultaneously. A named Mutex detects an existing instance; the second
+  launch activates the existing window and exits.
+
+### Changed
+- **Release assets** — executables are now named `SysManager-vX.Y.Z.exe` instead
+  of `SysManager.exe` to avoid filename conflicts when downloading multiple
+  releases.
+
+## [0.13.1] - 2026-04-24
+
+### Fixed
+- **Services tab** — Rec. column now shows empty for services without a gaming
+  recommendation instead of cluttering all 280+ rows with "keep-enabled".
+
+## [0.13.0] - 2026-04-24
+
+### Added
+- **Network Repair Tools** — DNS flush, Winsock reset, TCP/IP reset in a new
+  Repair sub-tab on the Network tab. Confirmation dialogs and admin checks.
+- **Restore Point Creation** — create a Windows System Restore point from the
+  Performance tab (requires admin).
+- **RAM Working Set Trim** — free physical RAM by trimming all process working
+  sets, same as RAMMap's "Empty Working Set" (Performance tab).
+- **Hibernation Toggle** — enable/disable hibernation from the Performance tab.
+  Disabling deletes hiberfil.sys and frees disk space.
+- **Services Management** — new Services tab listing all Windows services with
+  gaming recommendations (safe-to-disable / advanced / keep-enabled), filtering,
+  and start/stop/disable/enable controls.
+
+## [0.12.5] - 2026-04-24
+
+### Fixed
+- **Duplicate File Scanner** — dramatically faster duplicate detection using
+  a two-phase hashing approach. Files sharing a size are now pre-filtered by
+  a partial hash (first 4 KB) before computing the full SHA-256. Files that
+  differ in the first 4 KB are skipped entirely, avoiding gigabytes of
+  unnecessary I/O. (Closes #80)
+
+## [0.12.4] - 2026-04-24
+
+### Fixed
+- **Performance Mode** — processor state controls are now disabled when the
+  active power plan is High Performance or Ultimate Performance (Windows
+  forces min state to 100 %). A warning message explains the lock and how
+  to unlock by switching to Balanced. (Closes #103)
+- **Process Manager** — replaced the plain text status badge with a colored
+  dot + text indicator. Green for Running, red for Not responding. New
+  `ProcessStatusToBrushConverter`. (Closes #88)
+- **Sidebar progress** — added progress indicators in the left navigation
+  for Disk Analyzer and Duplicate File scans, matching the existing Deep
+  Cleanup mini-tray pattern. Click to navigate to the tab. (Closes #81, #91)
+
+## [0.12.3] - 2026-04-24
+
+### Fixed
+- **Cleanup tab** — added explanatory text describing what each operation
+  does (Clean TEMP, SFC /scannow, DISM /RestoreHealth) so users understand
+  the tools before running them. (Closes #92)
+- **System Health** — chkdsk status line now stays visible after the scan
+  finishes instead of disappearing. Shows green while running, muted gray
+  when done, so the user can see the result. (Closes #94)
+
+## [0.12.2] - 2026-04-24
+
+### Fixed
+- **Version display** — updated `.csproj` from `0.5.1` to `0.12.1` so the
+  app reports the correct version in the sidebar and About tab. Fixed
+  `auto-release.yml` + `release.yml` + `publish.ps1` to inject version at
+  build time via `/p:Version=`, so released binaries always match the tag.
+  (Closes #90)
+- **False update prompt** — the app no longer offers an update when already
+  running the latest version. Root cause was the stale assembly version.
+  (Closes #74)
+- **System Health** — renamed "Rescan" button to "Scan" to match the
+  initial prompt text. (Closes #97)
+- **System Health scroll** — fixed ConsoleView auto-scroll from
+  propagating `BringIntoView` to the parent ScrollViewer, which caused
+  the entire page to jump to the bottom during file-system scans. Now
+  scrolls the internal ListBox directly via `ScrollToEnd()`. (Closes #93)
+- **Startup tab** — now discovers startup items from shell:startup folders
+  (user + common) and Task Scheduler logon tasks, not just registry Run
+  keys. Resolves `.lnk` shortcuts to their target path. Deduplicates
+  entries already found in the registry. Filters out Microsoft/Windows
+  system tasks to reduce noise. (Closes #76)
+- **Cleanup tab** — auto-scans TEMP folders and Recycle Bin sizes on load,
+  showing results in two summary cards so the tab is no longer empty until
+  the user runs an action. (Closes #96)
+- **Uninstaller** — failed uninstalls now show descriptive error messages
+  instead of cryptic exit codes. Covers common winget/MSI codes: access
+  denied, cancelled, already removed, reboot required, installer busy.
+  (Closes #87)
+- **Network chart labels** — increased axis label font sizes and switched
+  to Segoe UI with brighter text color (`#E6E9EE`) for better readability
+  on the dark background. (Closes #99, #75)
+- **Issue templates** — added all missing tabs (Startup, Duplicates, Disk
+  Analyzer, Processes, Battery, Uninstaller, Performance) to both bug
+  report and feature request templates. Updated version placeholder.
+  (Closes #77)
+
+## [0.12.1] - 2026-04-23
+
+### Fixed
+- **CodeQL** — replaced bare `catch` blocks with specific exception types
+  (`SecurityException`, `UnauthorizedAccessException`) in PerformanceService
+  and PerformanceViewModel. No functional changes.
+
+## [0.12.0] - 2026-04-23
+
+### Added
+- **Performance Mode tab** — tune system performance settings with per-tweak
+  Apply buttons. Every change is non-destructive and reversible.
+  - **Power Plan**: switch between Balanced, High Performance, and Ultimate
+    Performance via powercfg.
+  - **Visual Effects**: reduce animations, fades, and shadows via P/Invoke
+    `SystemParametersInfo` (instant, no logout needed).
+  - **Game Mode**: enable or disable Windows Game Mode via registry.
+  - **Xbox Game Bar**: disable Game Bar overlay and Game DVR via registry.
+  - **NVIDIA GPU**: force max performance (DisableDynamicPstate) with
+    auto-detected GPU subkey (not hardcoded). Requires reboot.
+  - **Processor State**: force CPU min state to 100% via powercfg.
+  - **Overlays info**: manual instructions for Discord, Steam, NVIDIA GFE,
+    and EA App overlays (not safe to modify externally).
+  - **OriginalSnapshot**: captures exact system state before first change;
+    Restore All reverts to the snapshot, not hardcoded defaults.
+  - Confirmation dialog before every change.
+  - GPU changes warn about reboot requirement.
+- **38 new unit tests** for `PerformanceService`, `PerformanceViewModel`,
+  and `PerformanceProfile`.
+
+## [0.11.1] - 2026-04-23
+
+### Fixed
+- **Process Manager** — kill process now shows a Yes/No confirmation dialog
+  warning about potential data loss before terminating.
+- **Uninstaller** — uninstall shows a confirmation dialog listing all
+  selected apps before proceeding. Select All warns when selecting more
+  than 20 apps without an active filter.
+
+## [0.11.0] - 2026-04-23
+
+### Added
+- **Uninstaller tab** — lists all installed applications via winget and
+  allows batch uninstall of selected apps.
+  - Scan installed apps with `winget list`.
+  - Filter by name or package ID.
+  - Select/deselect all, checkbox per app.
+  - Uninstall selected apps silently via `winget uninstall`.
+  - Cancel support during scan and uninstall.
+  - Virtualized ListView for smooth scrolling.
+  - Live console output from winget.
+- **18 new unit tests** for `UninstallerService` (table parser, edge cases,
+  model properties) and `UninstallerViewModel` (commands, state, filter).
+
+## [0.10.0] - 2026-04-23
+
+### Added
+- **Battery Health tab** — monitors battery charge, health percentage, wear
+  level, cycle count, chemistry, design vs full-charge capacity, and
+  estimated runtime via WMI.
+  - Charge bar with percentage and status (Charging / Discharging / Full).
+  - Health % (full-charge ÷ design capacity) and wear % display.
+  - Detail grid: battery name, chemistry, design capacity, full-charge
+    capacity, cycle count, estimated runtime, manufacturer/ID.
+  - Gracefully shows "No battery detected" on desktops.
+  - Specific exception handling for CodeQL compliance.
+- **20 new unit tests** for `BatteryService` and `BatteryHealthViewModel` —
+  covers status mapping, chemistry mapping, model calculations, property
+  notifications, runtime display formatting, and ViewModel state.
+
+## [0.9.0] - 2026-04-23
+
+### Added
+- **Process Manager tab** — lists running Windows processes with memory,
+  thread count, and status. Supports kill, filter, sort, and open file
+  location.
+  - Lists all running processes with PID, name, description, memory,
+    threads, and responding status.
+  - Real-time filter by name, description, or PID.
+  - Sort by memory (default), name, or PID.
+  - Kill process button (per-process).
+  - Open file location in Explorer.
+  - Virtualized ListView for smooth scrolling with 200+ processes.
+- **24 new unit tests** for `ProcessManagerService` and
+  `ProcessManagerViewModel` — covers snapshot, entries, cancellation,
+  kill edge cases, model properties, commands, and filter/sort defaults.
+
+## [0.8.0] - 2026-04-23
+
+### Added
+- **Disk Analyzer tab** — shows space breakdown by top-level folders with
+  drill-down navigation and drive usage overview.
+  - Scans top-level subfolders and computes total size recursively.
+  - Shows folder name, size, file/folder count, and percentage bar.
+  - Drive usage bar with total/used/free at the top.
+  - Drill-down into any folder to see its subfolders.
+  - Go Up button to navigate back to parent.
+  - Preset paths (fixed drives, user profile, Program Files).
+  - Browse button for custom folder selection.
+  - Show in Explorer for each folder.
+  - Cancellation support.
+  - Read-only by design — nothing is modified.
+  - Skips system paths ($Recycle.Bin, WinSxS, System Volume Information).
+- **30 new unit tests** for `DiskAnalyzerService` and
+  `DiskAnalyzerViewModel` — covers empty dirs, subfolders, nested files,
+  root files, percentages, invalid inputs, cancellation, progress, and
+  model properties.
+
+## [0.7.0] - 2026-04-23
+
+### Added
+- **Duplicate File Finder tab** — scans a folder tree for files with
+  identical content and shows them grouped by SHA-256 hash.
+  - Two-pass scan: group by size first, then hash only size-matched files.
+  - SHA-256 content hashing with cancellation support.
+  - Duplicate groups sorted by wasted space (descending).
+  - Preset folders (user profile, documents, downloads, all fixed drives).
+  - Browse button for custom folder selection.
+  - Configurable minimum file size filter (default 1 KB).
+  - "Show in Explorer" and "Copy path" for each file.
+  - Read-only by design — no delete functionality.
+  - Skips system paths ($Recycle.Bin, WinSxS, System Volume Information)
+    and system files (pagefile, hiberfil, swapfile).
+- **41 new unit tests** for `DuplicateFileService` and
+  `DuplicateFileViewModel` — covers empty dirs, single files, duplicate
+  detection, subdirectories, min size filter, wasted bytes calculation,
+  cancellation, progress reporting, hash determinism, and model properties.
+
+## [0.6.0] - 2026-04-22
+
+### Added
+- **Startup Manager tab** — lists every program that runs at Windows boot
+  and lets users toggle them on/off non-destructively.
+  - Scans Registry `Run` / `RunOnce` keys (HKCU + HKLM).
+  - Reads `StartupApproved` state (same mechanism as Task Manager).
+  - Shows name, publisher, command, and enabled/disabled status.
+  - Toggle on/off writes to `StartupApproved` — original `Run` values are
+    never deleted.
+  - "Open file location" button for each entry.
+- **170 new unit tests** for services, models, and helpers — brings the
+  total past 1 300 tests.
+- **Author header** added to all source files (`laurentiu021`).
+
+### Changed
+- **Auto-release workflow** now triggers the release pipeline via
+  `workflow_dispatch` instead of relying on tag-push events, fixing a
+  race condition where the release job could start before the tag was
+  fully pushed.
+
+## [0.5.3] - 2026-04-22
+
+### Fixed
+- **CodeQL warnings resolved** — constant-condition check and
+  floating-point equality comparison cleaned up.
+- **Bug report template visibility** — the issue template was not
+  showing up correctly in the GitHub "New issue" picker.
+
+### Added
+- **Pure unit tests** for `CleanupViewModel`, `DeepCleanupViewModel`,
+  `LargeFileScanner`, and Helpers (converters + `AdminHelper`).
+- **Codecov configuration** (`.codecov.yml`) for coverage gating.
+- **General issue template** (bug / crash / stability) added to
+  `.github/ISSUE_TEMPLATE/`.
+- **Auto-release workflow** (`auto-release.yml`) — automatically bumps
+  the version and creates a GitHub Release when app code changes land
+  on `main`.
+
+### Changed
+- **CI** — Codecov upload upgraded to v5; explicit file glob removed.
+- **Discussions announcement** posted automatically on every release.
+- `.editor/` added to `.gitignore`.
+
+## [0.5.2] - 2026-04-21
+
+### Fixed
+- **Cascading error dialogs** — a `DispatcherTimer` ticking at 250 ms could
+  queue multiple UI-thread exceptions while a `MessageBox` was blocking the
+  dispatcher, producing a cascade of identical "SysManager error" dialogs and
+  eventually crashing the app. An interlocked flag now ensures at most one
+  error dialog is shown at a time.
+- **Ookla speed-test DLL dialogs** — `ProcessStartInfo.ErrorDialog` was not
+  set to `false`, so Windows would show a native "DLL was not found" system
+  dialog for every failed launch of `speedtest.exe`. The dialog is now
+  suppressed; the error surfaces cleanly in the Speed Test status bar instead.
+- **Corrupt `speedtest.exe` auto-recovery** — if the downloaded Ookla CLI is
+  smaller than 1 KB (partial/corrupt download), it is deleted automatically
+  so the next run re-downloads a clean copy.
+
+### Changed
+- **Dependencies** — LiveChartsCore 2.0.0-rc5.4 → 2.0.0 (stable release),
+  System.Management 10.0.6 → 10.0.7, all GitHub Actions updated to latest
+  major versions (checkout v6, setup-dotnet v5, cache v5, upload-artifact v7,
+  action-gh-release v3).
+
+### Added
+- **CodeQL security scanning** — weekly scheduled analysis plus scan on every
+  push/PR. Results visible in the Security tab.
+- **Codecov coverage tracking** — unit-test coverage uploaded on every CI run;
+  badge in README reflects latest `main` result.
+- **App screenshots** — all major tabs captured under `docs/screenshots/`.
+- **Repository hygiene** — `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
+  `SECURITY.md`, `SUPPORT.md`, `.editorconfig`, and a full
+  `.github/` folder (issue + PR templates, CI + release workflows,
+  Dependabot config, CODEOWNERS, FUNDING placeholder).
+- **CI** — GitHub Actions build + unit-test pipeline on every push/PR,
+  plus a separate UI-automation job. Cache NuGet packages between runs.
+- **Release workflow** — tag-driven build of a signed-free single-file
+  exe, SHA256 checksum file, automatic extraction of release notes from
+  `CHANGELOG.md`, uploaded together as a GitHub Release.
+- **Copy environment info** button on the About tab — copies SysManager
+  version, Windows version, architecture, .NET runtime and elevation
+  state to the clipboard, ready to paste into a bug report.
+- **Screenshots** folder (`docs/screenshots/`) with capture and privacy
+  conventions documented.
+- **Manual UI smoke script** (`docs/manual-smoke.ps1`) referenced from
+  `TESTING.md` — walks every nav tab via the Windows UI Automation tree.
+- **README badges** for CI status, latest release, downloads and open
+  issues. New sections for reporting bugs, security and contributing.
+
+### Fixed
+- **Broken unit tests on main** — three tests in
+  `DeepCleanupServiceTests` and `LargeFileScannerTests` no longer
+  matched the service signatures introduced in 0.5.1 (progress reporting).
+  They now compile and pass, and the cancellation tests correctly
+  assert `TaskCanceledException` from `Task.Run(..., cancelledToken)`.
+- **Flaky Network tests excluded from CI** — tests that depend on a
+  captured WPF dispatcher (`NetworkViewModelSampleTests`,
+  `NetworkViewModelDisableTests`, `NetworkHealthFeedbackTests`,
+  `NetworkButtonsTests`, `NetworkViewModelTests`,
+  `NetworkExhaustiveTests`) are now tagged
+  `[Trait("Category", "LocalOnly")]`. CI runs with
+  `--filter "Category!=LocalOnly"` so the build stays green while the
+  tests continue to run locally where the dispatcher is deterministic.
+- **More slow/real-system tests excluded from CI** — `EventLogServiceTests`,
+  `DiskHealthServiceTests`, `PowerShellRunnerTests`,
+  `PowerShellRunnerDebugTests`, `MemoryTestServiceTests`,
+  `SystemInfoServiceTests`, `AboutViewUiTests`, `DeepCleanupViewUiTests`
+  tagged `LocalOnly`; these hit real Windows APIs (Event Log, WMI,
+  PowerShell process, WPF pack URIs) that are unavailable or too slow on
+  the hosted runner.
+- **Bug fixes in test data** — `UpdateServiceTests.IsNewer_HandlesMajorJumps`
+  had `latest`/`current` columns swapped; corrected.
+- **Bug fix: `UpdateService.ParseVersion`** — `TrimStart('v','V')` stripped
+  all leading v characters, so `"vv1.2.3"` parsed successfully instead of
+  returning null. Now strips at most one leading v/V.
+- **Bug fix: `FixedDriveService.EnumerateAsync`** — passing a pre-cancelled
+  `CancellationToken` to `Task.Run` caused `TaskCanceledException` before
+  the synchronous `Enumerate()` delegate ran. Token is no longer forwarded.
+
+## [0.5.1] - 2026-04-20
+
+### Added
+- **Progress bars** everywhere the scanner runs:
+  - Deep cleanup scan — determinate bar with "[12/20] Scanning Steam..." status.
+  - Deep cleanup clean — same, as each selected category is emptied.
+  - Large files finder — indeterminate bar with live counter
+    ("4,328 files · 12.3 GB scanned") and current folder.
+- **Background task mini-tray** in the left sidebar (under the Admin
+  badge) — shows live progress for any running scan/clean/large-files
+  operation. Stays visible on every tab, clickable to jump back.
+
+### Changed
+- Scan and clean operations continue running when you navigate away to
+  other tabs. Progress and results are preserved in the view model.
+
+## [0.5.0] - 2026-04-20
+
+### Fixed
+- Update check would silently fail with "Couldn't reach GitHub" even when
+  the network was fine. The GitHub client now uses an explicit
+  `SocketsHttpHandler`, exposes the actual error message, retries once on
+  transient network failures, and shows a visible "Retry" button in the
+  About tab.
+
+### Added
+
+#### Deep cleanup (safe by design)
+- New **Deep cleanup** tab with opt-in categories and a scan-first workflow.
+- **System categories**: NVIDIA / AMD / Intel installer leftovers, Windows
+  Update cache, Delivery Optimization cache, Windows Installer patch cache
+  (`$PatchCache$`), TEMP folders, Prefetch, crash dumps and WER reports,
+  old CBS logs (> 30 days), DirectX shader cache, Recycle Bin on every
+  fixed drive.
+- **Gaming launcher caches** (never game files, never logins):
+  - Steam browser & depot cache (`appcache`, `htmlcache`, `depotcache`, `logs`)
+  - Steam per-game shader cache (`steamapps\shadercache`)
+  - Epic Games Launcher webcache and logs
+  - Battle.net agent cache and Blizzard launcher cache
+  - Riot Client / League of Legends client logs
+  - GOG Galaxy webcache and redists
+  - EA Desktop / Origin cache and logs
+- **Windows.old** is detected and shown with an "Irreversible" tag — never
+  selected by default.
+- Every deletion is wrapped in try/catch so locked files are skipped, not
+  forced. A live total shows how much space you'll reclaim.
+
+#### Large files finder
+- Scan any preset folder (Downloads, Documents, Desktop, Videos, Pictures,
+  Music, Program Files, Program Files x86) or a whole fixed drive.
+- Configurable min size (default 500 MB) and top N results (default 100).
+- Read-only: results only expose "Show in Explorer" and "Copy path" —
+  deletion is disabled by design, even with admin rights.
+- Skips pagefile/hiberfil/swapfile, WinSxS, System Volume Information,
+  Recycle Bin and critical system config folders.
+
+#### Update system
+- Auto update check on startup against the GitHub Releases API, plus a
+  manual "Check for updates" button.
+- New **About** tab showing the current version, build date, license, and
+  a full release-note history pulled live from GitHub.
+- Discreet banner in the main window when a newer version is detected,
+  linking to the About tab for details.
+- Automatic background download of the new build with a progress bar.
+  If the automatic download is blocked, a "Manual download" button opens
+  the GitHub release page in the browser.
+- One-click "Install" button that launches the downloaded build and
+  closes the current instance so the new version takes over.
+
+### Security
+- Deep cleanup **never** touches: browser caches / cookies / passwords,
+  launcher login tokens, the registry, active drivers, Program Files,
+  `AppData\Roaming` (live app settings), `ProgramData\NVIDIA` root, or
+  actual game files in `steamapps\common`.
+- Large files finder is read-only — no delete button exists, so a
+  mis-click can't hurt anything important.
+
+## [0.4.0] - 2026-04-20
+
+### Added
+- File-system scan auto-discovers all fixed NTFS/ReFS drives and shows a
+  checkbox list. Scan one drive, a few, or all of them — runs sequentially
+  so disks don't fight for I/O.
+- "Scan selected" button in System Health for bulk chkdsk.
+- Auto-check for the PSWindowsUpdate module on the Windows Update tab. A
+  yellow card prompts installation if it's missing.
+- Background-task indicators for SFC and DISM so you can navigate away while
+  they grind in the background.
+
+### Fixed
+- chkdsk "Access is denied" when the app was launched from a non-system
+  working directory (e.g. `E:\Downloads`). All spawned processes now start
+  from `System32`.
+
+### Changed
+- SFC and DISM no longer block the whole Cleanup tab. Each has its own
+  running state; you can keep cleaning TEMP or browsing other tabs while
+  they run.
+
+## [0.3.0] - 2026-04-20
+
+### Added
+- Self-contained single-file publish profile (`publish.ps1`).
+- README, ARCHITECTURE, TESTING, and LICENSE documentation.
+- `.gitignore` tuned for .NET / WPF projects.
+
+### Changed
+- README rewritten as a general-purpose local monitoring tool.

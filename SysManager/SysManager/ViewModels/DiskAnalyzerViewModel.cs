@@ -1,0 +1,245 @@
+// SysManager · DiskAnalyzerViewModel — disk space breakdown
+// Author: laurentiu021 · https://github.com/laurentiu021/SystemManager
+// License: MIT
+
+using System.Collections.ObjectModel;
+using System.IO;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Serilog;
+using SysManager.Helpers;
+using SysManager.Models;
+using SysManager.Services;
+
+namespace SysManager.ViewModels;
+
+/// <summary>
+/// Disk Analyzer tab — shows space breakdown by top-level folders.
+/// Read-only: only "Show in Explorer" is offered.
+/// </summary>
+public sealed partial class DiskAnalyzerViewModel : ViewModelBase
+{
+    private readonly DiskAnalyzerService _service;
+    private CancellationTokenSource? _cts;
+
+    public BulkObservableCollection<DiskUsageEntry> Entries { get; } = new();
+    public ObservableCollection<string> PresetPaths { get; } = new();
+
+    [ObservableProperty] private string _selectedPath = "";
+    [ObservableProperty] private string _scanSummary = "Select a drive or folder and click Analyze.";
+    [ObservableProperty] private long _totalSize;
+    [ObservableProperty] private int _totalFiles;
+    [ObservableProperty] private int _totalFolders;
+    [ObservableProperty] private int _entryCount;
+    [ObservableProperty] private string _currentFolder = "";
+
+    // Drive-level info
+    [ObservableProperty] private long _driveTotal;
+    [ObservableProperty] private long _driveFree;
+    [ObservableProperty] private long _driveUsed;
+    [ObservableProperty] private double _driveUsedPercent;
+    [ObservableProperty] private bool _hasDriveInfo;
+
+    public DiskAnalyzerViewModel(DiskAnalyzerService service)
+    {
+        _service = service;
+        // Probe drives off the UI thread: DriveInfo.IsReady can stall on a disconnected
+        // mapped/removable volume, which would freeze startup since this VM is built eagerly.
+        // The collection update runs back on the UI thread.
+        InitializeAsync(PopulatePresetsAsync);
+    }
+
+    private async Task PopulatePresetsAsync()
+    {
+        var paths = await Task.Run(EnumeratePresetPaths).ConfigureAwait(true);
+        foreach (var p in paths)
+            PresetPaths.Add(p);
+        if (PresetPaths.Count > 0)
+            SelectedPath = PresetPaths[0];
+    }
+
+    private static List<string> EnumeratePresetPaths()
+    {
+        var result = new List<string>();
+        foreach (var d in DriveInfo.GetDrives().Where(x => x.DriveType == DriveType.Fixed && x.IsReady))
+            result.Add(d.RootDirectory.FullName);
+
+        string[] special =
+        [
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+        ];
+        foreach (var p in special.Where(x => !string.IsNullOrEmpty(x) && Directory.Exists(x) && !result.Contains(x)))
+            result.Add(p);
+
+        return result;
+    }
+
+    [RelayCommand]
+    private async Task AnalyzeAsync()
+    {
+        if (string.IsNullOrWhiteSpace(SelectedPath)) return;
+
+        using var opLock = OperationLockService.Instance.TryAcquire(OperationCategory.Disk, "Disk Analysis");
+        if (opLock is null)
+        {
+            ScanSummary = $"Cannot start — {OperationLockService.Instance.GetActiveOperationName(OperationCategory.Disk)} is already running.";
+            return;
+        }
+
+        _cts?.Cancel();
+        _cts?.Dispose();
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+
+        IsBusy = true;
+        IsProgressIndeterminate = true;
+        StatusMessage = "Analyzing…";
+        Entries.Clear();
+        TotalSize = 0;
+        TotalFiles = 0;
+        TotalFolders = 0;
+        EntryCount = 0;
+
+        UpdateDriveInfo();
+
+        try
+        {
+            var progress = new Progress<DiskAnalyzerService.AnalysisProgress>(p =>
+            {
+                CurrentFolder = p.CurrentFolder;
+                StatusMessage = $"Scanning folder {p.FoldersScanned}: {p.CurrentFolder}";
+            });
+
+            var results = await _service.AnalyzeAsync(SelectedPath, progress, ct);
+
+            Entries.ReplaceWith(results);
+
+            EntryCount = Entries.Count;
+            TotalSize = Entries.Sum(e => e.SizeBytes);
+            TotalFiles = Entries.Sum(e => e.FileCount);
+            TotalFolders = Entries.Sum(e => e.FolderCount);
+
+            ScanSummary = EntryCount == 0
+                ? "No subfolders found."
+                : $"{EntryCount} folders · {FormatSize(TotalSize)} total · {TotalFiles:N0} files";
+            StatusMessage = "Analysis complete.";
+            ToastService.Instance.Show("Disk Analysis complete", $"{EntryCount} folders, {FormatSize(TotalSize)} total");
+            Log.Information("Disk analysis completed: {Folders} folders, {Size} total",
+                EntryCount, FormatSize(TotalSize));
+        }
+        catch (OperationCanceledException)
+        {
+            StatusMessage = "Analysis cancelled.";
+        }
+        catch (IOException ex)
+        {
+            StatusMessage = $"Analysis failed: {ex.Message}";
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            StatusMessage = $"Analysis failed: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+            IsProgressIndeterminate = false;
+            CurrentFolder = "";
+        }
+    }
+
+    [RelayCommand]
+    private void CancelAnalysis() => _cts?.Cancel();
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _cts?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    [RelayCommand]
+    private static void ShowInExplorer(DiskUsageEntry? entry)
+    {
+        if (entry is null) return;
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"\"{entry.FullPath}\"",
+                UseShellExecute = true
+            })?.Dispose();
+        }
+        catch (InvalidOperationException ex) { Log.Debug(ex, "Failed to open explorer for {Path}", entry.FullPath); }
+        catch (System.ComponentModel.Win32Exception ex) { Log.Debug(ex, "Failed to open explorer for {Path}", entry.FullPath); }
+    }
+
+    [RelayCommand]
+    private async Task DrillDown(DiskUsageEntry? entry)
+    {
+        if (entry is null || entry.Name == "(files in root)") return;
+        SelectedPath = entry.FullPath;
+        if (!PresetPaths.Contains(entry.FullPath))
+            PresetPaths.Add(entry.FullPath);
+        await AnalyzeAsync();
+    }
+
+    [RelayCommand]
+    private async Task GoUp()
+    {
+        if (string.IsNullOrWhiteSpace(SelectedPath)) return;
+        var parent = Directory.GetParent(SelectedPath);
+        if (parent is not null)
+        {
+            SelectedPath = parent.FullName;
+            await AnalyzeAsync();
+        }
+    }
+
+    [RelayCommand]
+    private void BrowseFolder()
+    {
+        var dialog = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "Select folder to analyze"
+        };
+        if (dialog.ShowDialog() == true)
+        {
+            SelectedPath = dialog.FolderName;
+            if (!PresetPaths.Contains(SelectedPath))
+                PresetPaths.Add(SelectedPath);
+        }
+    }
+
+    private void UpdateDriveInfo()
+    {
+        try
+        {
+            var root = Path.GetPathRoot(SelectedPath);
+            if (!string.IsNullOrEmpty(root))
+            {
+                var di = new DriveInfo(root);
+                if (di.IsReady)
+                {
+                    DriveTotal = di.TotalSize;
+                    DriveFree = di.AvailableFreeSpace;
+                    DriveUsed = DriveTotal - DriveFree;
+                    DriveUsedPercent = DriveTotal > 0
+                        ? Math.Round(DriveUsed * 100.0 / DriveTotal, 1)
+                        : 0;
+                    HasDriveInfo = true;
+                    return;
+                }
+            }
+        }
+        catch (IOException ex) { Log.Debug(ex, "Failed to read drive info for {Path}", SelectedPath); }
+        catch (UnauthorizedAccessException ex) { Log.Debug(ex, "Access denied reading drive info for {Path}", SelectedPath); }
+        HasDriveInfo = false;
+    }
+
+    private static string FormatSize(long bytes) => Helpers.FormatHelper.FormatSize(bytes);
+}

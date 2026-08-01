@@ -1,0 +1,175 @@
+// SysManager · ShortcutCleanerViewModel — find and remove broken shortcuts
+// Author: laurentiu021 · https://github.com/laurentiu021/SystemManager
+// License: MIT
+
+using System.Windows;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Serilog;
+using SysManager.Helpers;
+using SysManager.Models;
+using SysManager.Services;
+
+namespace SysManager.ViewModels;
+
+/// <summary>
+/// Shortcut Cleaner tab — scans for broken .lnk files and allows deletion.
+/// </summary>
+public sealed partial class ShortcutCleanerViewModel : ViewModelBase
+{
+    private readonly ShortcutCleanerService _service;
+    private CancellationTokenSource? _cts;
+
+    public BulkObservableCollection<BrokenShortcut> BrokenShortcuts { get; } = new();
+
+    [ObservableProperty] private bool _isElevated;
+    [ObservableProperty] private string _scanStatus = "Click Scan to find broken shortcuts.";
+    [ObservableProperty] private string _currentLocation = "";
+    [ObservableProperty] private int _brokenCount;
+    [ObservableProperty] private int _selectedCount;
+    [ObservableProperty] private bool _isScanning;
+    [ObservableProperty] private bool _moveToRecycleBin = true;
+
+    public ShortcutCleanerViewModel(ShortcutCleanerService service)
+    {
+        _service = service;
+        IsElevated = AdminHelper.IsElevated();
+    }
+
+    [RelayCommand]
+    private void RelaunchAsAdmin()
+    {
+        if (AdminHelper.RelaunchAsAdmin())
+            System.Windows.Application.Current?.Shutdown();
+    }
+
+    [RelayCommand]
+    private async Task ScanAsync()
+    {
+        if (IsScanning) return;
+
+        using var opLock = OperationLockService.Instance.TryAcquire(OperationCategory.Disk, "Shortcut Scan");
+        if (opLock is null)
+        {
+            ScanStatus = $"Cannot start — {OperationLockService.Instance.GetActiveOperationName(OperationCategory.Disk)} is already running.";
+            return;
+        }
+
+        IsScanning = true;
+        IsBusy = true;
+        IsProgressIndeterminate = true;
+        // MEM-007: Unsubscribe from old items before clearing to prevent
+        // PropertyChanged lambda leaks across rescans.
+        foreach (var old in BrokenShortcuts)
+            old.PropertyChanged -= OnShortcutPropertyChanged;
+        BrokenShortcuts.ReplaceWith(Array.Empty<BrokenShortcut>());
+        BrokenCount = 0;
+        SelectedCount = 0;
+        ScanStatus = "Scanning...";
+        _cts?.Dispose();
+        _cts = new CancellationTokenSource();
+
+        try
+        {
+            var progress = new Progress<string>(msg => CurrentLocation = msg);
+            var results = await _service.ScanAsync(progress, _cts.Token);
+
+            foreach (var s in results)
+                s.PropertyChanged += OnShortcutPropertyChanged;
+            BrokenShortcuts.ReplaceWith(results);
+
+            BrokenCount = BrokenShortcuts.Count;
+            SelectedCount = BrokenShortcuts.Count(x => x.IsSelected);
+            ScanStatus = BrokenCount == 0
+                ? "No broken shortcuts found — your system is clean."
+                : $"Found {BrokenCount} broken shortcut{(BrokenCount == 1 ? "" : "s")}.";
+            CurrentLocation = "";
+            Log.Information("Shortcut scan completed: {Count} broken shortcuts found", BrokenCount);
+            ToastService.Instance.Show("Shortcut scan complete", $"{BrokenCount} broken shortcut{(BrokenCount == 1 ? "" : "s")} found");
+        }
+        catch (OperationCanceledException) { ScanStatus = "Scan cancelled."; }
+        catch (System.IO.IOException ex) { ScanStatus = $"Scan failed: {ex.Message}"; }
+        catch (UnauthorizedAccessException ex) { ScanStatus = $"Scan failed: {ex.Message}"; }
+        finally
+        {
+            IsScanning = false;
+            IsBusy = false;
+            IsProgressIndeterminate = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task DeleteSelectedAsync()
+    {
+        var selected = BrokenShortcuts.Where(x => x.IsSelected).ToList();
+        if (selected.Count == 0)
+        {
+            ScanStatus = "No shortcuts selected for deletion.";
+            return;
+        }
+
+        var action = MoveToRecycleBin ? "move to Recycle Bin" : "permanently delete";
+        if (!DialogService.Instance.Confirm(
+            $"Are you sure you want to {action} {selected.Count} broken shortcut{(selected.Count == 1 ? "" : "s")}?",
+            "Delete Broken Shortcuts — Confirm")) return;
+
+        // Hold the Disk operation lock across the delete so it can't race a
+        // concurrent disk operation (cleanup / tune-up), mirroring ScanAsync.
+        using var opLock = OperationLockService.Instance.TryAcquire(OperationCategory.Disk, "Shortcut Delete");
+        if (opLock is null)
+        {
+            ScanStatus = $"Cannot start — {OperationLockService.Instance.GetActiveOperationName(OperationCategory.Disk)} is already running.";
+            return;
+        }
+
+        // The shell delete (SHFileOperation) is synchronous and can take a while for
+        // many items — run it off the UI thread so the window stays responsive.
+        var deleted = await Task.Run(() => ShortcutCleanerService.DeleteShortcuts(selected, MoveToRecycleBin));
+
+        // Remove deleted items from the list
+        foreach (var s in selected.Where(s => !System.IO.File.Exists(s.ShortcutPath)))
+        {
+            BrokenShortcuts.Remove(s);
+        }
+
+        BrokenCount = BrokenShortcuts.Count;
+        SelectedCount = BrokenShortcuts.Count(x => x.IsSelected);
+        ScanStatus = $"Deleted {deleted} shortcut{(deleted == 1 ? "" : "s")}. {BrokenCount} remaining.";
+        ToastService.Instance.Show("Shortcuts deleted", $"{deleted} shortcut{(deleted == 1 ? "" : "s")} removed");
+        Log.Information("Deleted {Count} broken shortcuts (recycle bin: {RecycleBin})", deleted, MoveToRecycleBin);
+    }
+
+    [RelayCommand]
+    private void SelectAll()
+    {
+        foreach (var s in BrokenShortcuts) s.IsSelected = true;
+        SelectedCount = BrokenShortcuts.Count;
+    }
+
+    [RelayCommand]
+    private void DeselectAll()
+    {
+        foreach (var s in BrokenShortcuts) s.IsSelected = false;
+        SelectedCount = 0;
+    }
+
+    [RelayCommand]
+    private void Cancel() => _cts?.Cancel();
+
+    private void OnShortcutPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(BrokenShortcut.IsSelected))
+            SelectedCount = BrokenShortcuts.Count(x => x.IsSelected);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            foreach (var s in BrokenShortcuts)
+                s.PropertyChanged -= OnShortcutPropertyChanged;
+            _cts?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+}

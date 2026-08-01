@@ -1,0 +1,277 @@
+<!-- SysManager · Author: laurentiu021 · https://github.com/laurentiu021/SystemManager · License: MIT -->
+<UserControl x:Class="SysManager.Views.BulkInstallerView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:SysManager.ViewModels"
+             d:DataContext="{d:DesignInstance vm:BulkInstallerViewModel}"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             Background="{DynamicResource Surface0}">
+
+    <Grid Margin="28,24,28,16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,16">
+            <TextBlock Text="Bulk Installer" Style="{StaticResource Display}"/>
+            <TextBlock Text="Select applications to install in bulk via winget."
+                       Style="{StaticResource Subtle}" Margin="0,4,0,0"/>
+        </StackPanel>
+
+        <!-- Elevation banner: not elevated -->
+        <Border Grid.Row="1" Background="{DynamicResource Surface2}" BorderBrush="{DynamicResource Border1}"
+                BorderThickness="1" CornerRadius="8" Padding="14,12" Margin="0,0,0,12"
+                Visibility="{Binding IsElevated, Converter={StaticResource FlexVis}, ConverterParameter=Inverse}">
+            <DockPanel>
+                <Button Content="Run as administrator" Command="{Binding RelaunchAsAdminCommand}"
+                        Style="{StaticResource AdminButton}" DockPanel.Dock="Right" Padding="14,8"/>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="&#xE83D;" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets"
+                               FontSize="16" Margin="0,0,10,0" Foreground="{DynamicResource TextSecondary}"/>
+                    <TextBlock Text="Some applications install system-wide and require administrator privileges."
+                               Foreground="{DynamicResource TextSecondary}" FontSize="13" VerticalAlignment="Center"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- Elevation banner: elevated -->
+        <Border Grid.Row="1" Background="{DynamicResource WarningBgSubtle}" BorderBrush="{DynamicResource WarningBg}" BorderThickness="1"
+                CornerRadius="12" Padding="12,8" Margin="0,0,0,12"
+                Visibility="{Binding IsElevated, Converter={StaticResource FlexVis}}">
+            <Grid>
+                <Border Background="{DynamicResource WarningStripe}" Width="4" HorizontalAlignment="Left" CornerRadius="2"
+                        Margin="-12,-8,0,-8"/>
+                <StackPanel Orientation="Horizontal" Margin="6,0,0,0">
+                    <TextBlock Text="&#x1F6E1;" FontSize="13" VerticalAlignment="Center"/>
+                    <TextBlock Text="Running as administrator — all applications can be installed."
+                               Foreground="{DynamicResource WarningText}" FontSize="13" FontWeight="SemiBold" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Toolbar -->
+        <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0,0,0,12" Padding="12">
+            <WrapPanel>
+                <TextBlock Text="Category:" VerticalAlignment="Center" Margin="0,0,8,0"
+                           Style="{StaticResource Subtle}"/>
+                <ComboBox ItemsSource="{Binding Categories}"
+                          SelectedItem="{Binding SelectedCategory}"
+                          Width="140" Margin="0,0,12,0"
+                          AutomationProperties.Name="Filter apps by category"/>
+                <TextBlock Text="Search:" VerticalAlignment="Center" Margin="0,0,8,0"
+                           Style="{StaticResource Subtle}"/>
+                <Grid Width="200" Margin="0,0,12,0">
+                    <TextBox Text="{Binding FilterText, UpdateSourceTrigger=PropertyChanged}"
+                             AutomationProperties.Name="Filter catalog apps"/>
+                    <TextBlock Text="Search apps…" IsHitTestVisible="False"
+                               Foreground="{DynamicResource TextMuted}" Margin="6,0,0,0"
+                               VerticalAlignment="Center" FontSize="12"
+                               Visibility="{Binding FilterText, Converter={StaticResource FlexVis}, ConverterParameter=Inverse}"/>
+                </Grid>
+                <Button Content="Install Selected" Command="{Binding InstallSelectedCommand}"
+                        Style="{StaticResource PrimaryButton}" Margin="0,0,8,0"/>
+                <Button Content="Select All" Command="{Binding SelectAllCommand}"
+                        Style="{StaticResource GhostButton}" Margin="0,0,4,0"/>
+                <Button Content="Deselect All" Command="{Binding DeselectAllCommand}"
+                        Style="{StaticResource GhostButton}" Margin="0,0,8,0"/>
+                <Button Content="Cancel" Command="{Binding CancelCommand}"
+                        Style="{StaticResource GhostButton}"
+                        Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}"/>
+                <CheckBox Content="Load app icons from the web" IsChecked="{Binding LoadWebIcons}"
+                          VerticalAlignment="Center" Margin="12,0,0,0"
+                          AutomationProperties.Name="Load app icons from the web"
+                          ToolTip="Off by default to keep SysManager fully local. When on, app icons are fetched from Google's favicon service (google.com/s2/favicons), which reveals the queried app domains to Google."/>
+            </WrapPanel>
+        </Border>
+
+        <!-- Custom winget search -->
+        <Border Grid.Row="3" Style="{StaticResource Card}" Margin="0,0,0,12" Padding="12">
+            <StackPanel>
+                <TextBlock Text="Search winget packages" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="Find and install any app available on winget."
+                           Style="{StaticResource Subtle}" Margin="0,2,0,12"/>
+                <DockPanel>
+                    <Button Content="Search" Command="{Binding SearchWingetCommand}"
+                            Style="{StaticResource PrimaryButton}" DockPanel.Dock="Right" Margin="8,0,0,0"/>
+                    <Grid>
+                        <TextBox Text="{Binding SearchQuery, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Search winget packages"/>
+                        <TextBlock Text="Search apps…" IsHitTestVisible="False"
+                                   Foreground="{DynamicResource TextMuted}" Margin="6,0,0,0"
+                                   VerticalAlignment="Center" FontSize="12"
+                                   Visibility="{Binding SearchQuery, Converter={StaticResource FlexVis}, ConverterParameter=Inverse}"/>
+                    </Grid>
+                </DockPanel>
+
+                <!-- Searching indicator -->
+                <ProgressBar IsIndeterminate="True" Height="2" Margin="0,8,0,0"
+                             Visibility="{Binding IsSearching, Converter={StaticResource BoolToVis}}"/>
+
+                <!-- Search results -->
+                <ItemsControl ItemsSource="{Binding SearchResults}" Margin="0,8,0,0"
+                              Visibility="{Binding SearchResults.Count, Converter={StaticResource FlexVis}}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Padding="8,6" Margin="0,1" CornerRadius="8" Background="Transparent">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Style.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter Property="Background" Value="{DynamicResource Surface2}"/>
+                                            </Trigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{Binding Name}"
+                                               FontSize="12.5" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource TextPrimary}"
+                                               TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding WingetId}"
+                                               FontSize="11" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource TextMuted}"
+                                               Margin="12,0" TextTrimming="CharacterEllipsis"
+                                               MaxWidth="220"/>
+                                    <Button Grid.Column="2" Content="Add"
+                                            Command="{Binding DataContext.AddToInstallListCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding}"
+                                            Style="{StaticResource GhostButton}"
+                                            AutomationProperties.Name="{Binding Name, StringFormat='Add {0} to install list'}"
+                                            Padding="10,4" FontSize="11"/>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </Border>
+
+        <!-- App list (grouped by category) -->
+        <Border Grid.Row="4" Style="{StaticResource Card}" Padding="0">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0">
+                <ItemsControl ItemsSource="{Binding GroupedView}"
+                              VirtualizingPanel.IsVirtualizing="True"
+                              VirtualizingPanel.VirtualizationMode="Recycling">
+
+                    <!-- Category group headers -->
+                    <ItemsControl.GroupStyle>
+                        <GroupStyle>
+                            <GroupStyle.HeaderTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="16,20,16,6">
+                                        <TextBlock Text="{Binding Name}"
+                                                   FontWeight="SemiBold" FontSize="14"
+                                                   Foreground="{DynamicResource TextPrimary}"/>
+                                        <Rectangle Height="1" Fill="{DynamicResource Border1}" Margin="0,8,0,0"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </GroupStyle.HeaderTemplate>
+                        </GroupStyle>
+                    </ItemsControl.GroupStyle>
+
+                    <!-- Individual app row -->
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Padding="16,10" Margin="4,1"
+                                    CornerRadius="8" Background="Transparent"
+                                    ToolTip="{Binding WingetId}">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Style.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter Property="Background" Value="{DynamicResource AccentSoft}"/>
+                                            </Trigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- Checkbox -->
+                                    <CheckBox Grid.Column="0" VerticalAlignment="Center"
+                                              IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}"
+                                              AutomationProperties.Name="{Binding Name, StringFormat='Select {0}'}"
+                                              Margin="0,0,12,0"/>
+
+                                    <!-- App icon (real favicon or category glyph fallback) -->
+                                    <Grid Grid.Column="1" Width="24" Height="24" Margin="0,0,12,0"
+                                          VerticalAlignment="Center">
+                                        <Image Source="{Binding Icon}" Width="24" Height="24"
+                                               RenderOptions.BitmapScalingMode="HighQuality"
+                                               Visibility="{Binding Icon, Converter={StaticResource FlexVis}}"/>
+                                        <TextBlock Text="{Binding IconGlyph}"
+                                                   FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets"
+                                                   FontSize="18" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource TextSecondary}"
+                                                   Visibility="{Binding Icon, Converter={StaticResource FlexVis}, ConverterParameter=Inverse}"/>
+                                    </Grid>
+
+                                    <!-- Name + description -->
+                                    <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding Name}"
+                                                       FontWeight="SemiBold" FontSize="13"
+                                                       Foreground="{DynamicResource TextPrimary}"/>
+                                            <Border CornerRadius="4" Padding="4,2" Margin="8,0,0,0" Background="{DynamicResource Surface2}" BorderBrush="{DynamicResource Success}" BorderThickness="1"
+                                                    Visibility="{Binding IsInstalled, Converter={StaticResource BoolToVis}}">
+                                                <TextBlock Text="Installed" FontSize="9" Foreground="{DynamicResource Success}" FontWeight="SemiBold"/>
+                                            </Border>
+                                        </StackPanel>
+                                        <TextBlock Text="{Binding Description}"
+                                                   FontSize="11.5" Margin="0,2,0,0"
+                                                   Foreground="{DynamicResource TextSecondary}"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                    </StackPanel>
+
+                                    <!-- Status badge -->
+                                    <Border Grid.Column="3" CornerRadius="8" Padding="8,4"
+                                            Background="{DynamicResource Surface2}" BorderBrush="{DynamicResource Border1}" BorderThickness="1"
+                                            VerticalAlignment="Center" Margin="12,0,0,0"
+                                            Visibility="{Binding Status, Converter={StaticResource FlexVis}}">
+                                        <Grid>
+                                            <Border Background="{DynamicResource Border2}" Width="3" HorizontalAlignment="Left"
+                                                    CornerRadius="2" Margin="-8,-4,0,-4"/>
+                                            <TextBlock Text="{Binding Status}" FontSize="11" Foreground="{DynamicResource TextMuted}"
+                                                       FontWeight="SemiBold" Margin="4,0,0,0"
+                                                       TextTrimming="CharacterEllipsis" MaxWidth="120"/>
+                                        </Grid>
+                                    </Border>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+
+                </ItemsControl>
+            </ScrollViewer>
+        </Border>
+
+        <!-- Status bar -->
+        <DockPanel Grid.Row="5" Margin="0,8,0,0">
+            <ProgressBar AutomationProperties.Name="Progress" DockPanel.Dock="Left" Width="120" Height="4" Margin="0,0,12,0"
+                         IsIndeterminate="{Binding IsProgressIndeterminate}"
+                         Value="{Binding Progress}"
+                         Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}"/>
+            <TextBlock Text="{Binding InstallEtaText}" Foreground="{DynamicResource TextMuted}" FontSize="11" Margin="0,0,8,0" VerticalAlignment="Center"
+                       Visibility="{Binding InstallEtaText, Converter={StaticResource FlexVis}}" DockPanel.Dock="Left"/>
+            <TextBlock Text="{Binding StatusMessage}" Style="{StaticResource Caption}"/>
+        </DockPanel>
+    </Grid>
+</UserControl>

@@ -1,0 +1,206 @@
+<!-- SysManager · Author: laurentiu021 · https://github.com/laurentiu021/SystemManager · License: MIT -->
+<UserControl x:Class="SysManager.Views.PingView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:lvc="clr-namespace:LiveChartsCore.SkiaSharpView.WPF;assembly=LiveChartsCore.SkiaSharpView.WPF"
+             xmlns:v="clr-namespace:SysManager.Views">
+
+    <Grid Background="{DynamicResource Surface0}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <DockPanel Grid.Row="0" Margin="28,24,28,0">
+            <StackPanel>
+                <TextBlock Text="Ping" Style="{StaticResource Display}"/>
+                <TextBlock Text="Live ping monitoring with latency chart and health verdict."
+                           Style="{StaticResource Subtle}" Margin="0,4,0,0"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
+                        DockPanel.Dock="Right" VerticalAlignment="Center">
+                <Button Content="Start" Command="{Binding StartCommand}"
+                        Style="{StaticResource PrimaryButton}"
+                        AutomationProperties.Name="Start ping monitoring"
+                        Visibility="{Binding Shared.IsMonitoring,
+                            Converter={StaticResource FlexVis},
+                            ConverterParameter=Inverse}"/>
+                <Button Content="Stop" Command="{Binding StopCommand}"
+                        Style="{StaticResource SecondaryButton}"
+                        AutomationProperties.Name="Stop ping monitoring"
+                        Visibility="{Binding Shared.IsMonitoring,
+                            Converter={StaticResource FlexVis}}"/>
+                <Button Content="Clear" Command="{Binding ClearHistoryCommand}"
+                        Style="{StaticResource GhostButton}" Margin="6,0,0,0"
+                        AutomationProperties.Name="Clear ping history"/>
+            </StackPanel>
+        </DockPanel>
+
+        <!-- Health verdict -->
+        <Border Grid.Row="1" Style="{StaticResource Card}" Margin="28,16,28,0"
+                BorderBrush="{Binding Shared.Health.ColorHex, Converter={StaticResource HexBrush}}"
+                BorderThickness="1">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Ellipse Width="12" Height="12" Margin="0,0,10,0" VerticalAlignment="Center"
+                                 Fill="{Binding Shared.Health.ColorHex, Converter={StaticResource HexBrush}}"/>
+                        <TextBlock Text="{Binding Shared.Health.Headline}" FontSize="18" FontWeight="SemiBold"
+                                   Foreground="{Binding Shared.Health.ColorHex, Converter={StaticResource HexBrush}}"/>
+                    </StackPanel>
+                    <TextBlock Text="{Binding Shared.Health.Detail}" Foreground="{DynamicResource TextSecondary}"
+                               Margin="22,6,0,0" TextWrapping="Wrap" MaxWidth="820"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Border Style="{StaticResource CardInner}" Margin="8,0" Padding="16,8" MinWidth="110">
+                        <StackPanel>
+                            <TextBlock Text="AVG PING" Style="{StaticResource SectionLabel}"/>
+                            <TextBlock Text="{Binding Shared.Health.AveragePingMs, StringFormat={}{0:F0} ms}"
+                                       Style="{StaticResource Metric}" Foreground="{DynamicResource Info}"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource CardInner}" Margin="8,0" Padding="16,8" MinWidth="110">
+                        <StackPanel>
+                            <TextBlock Text="WORST LOSS" Style="{StaticResource SectionLabel}"/>
+                            <TextBlock Text="{Binding Shared.Health.WorstLossPercent, StringFormat={}{0:F1}%}"
+                                       Style="{StaticResource Metric}" Foreground="{DynamicResource WarningText}"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource CardInner}" Margin="8,0" Padding="16,8" MinWidth="110">
+                        <StackPanel>
+                            <TextBlock Text="WORST JITTER" Style="{StaticResource SectionLabel}"/>
+                            <TextBlock Text="{Binding Shared.Health.WorstJitterMs, StringFormat={}{0:F0} ms}"
+                                       Style="{StaticResource Metric}" Foreground="{DynamicResource Warning}"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Targets -->
+        <Border Grid.Row="2" Style="{StaticResource Card}" Margin="28,16,28,0">
+            <StackPanel>
+                <DockPanel>
+                    <TextBlock Text="Targets" Style="{StaticResource SectionTitle}"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" DockPanel.Dock="Right" VerticalAlignment="Center">
+                        <TextBlock Text="Preset" Style="{StaticResource Subtle}" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                        <ComboBox ItemsSource="{Binding Shared.Presets}"
+                                  SelectedItem="{Binding Shared.SelectedPreset, Mode=TwoWay}" Width="200"
+                                  TextSearch.TextPath="Name"
+                                  AutomationProperties.Name="Target preset">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"/>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </StackPanel>
+                </DockPanel>
+                <TextBlock Text="{Binding Shared.SelectedPreset.Description}"
+                           Style="{StaticResource Subtle}" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"/>
+                <ItemsControl ItemsSource="{Binding Shared.Targets}" Margin="0,14,0,0">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <UniformGrid Columns="2"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Margin="0,0,10,10" Padding="14,12" CornerRadius="12"
+                                    Background="{DynamicResource AccentSoft}" BorderBrush="{DynamicResource Border1}" BorderThickness="1">
+                                <Grid>
+                                    <Border Background="{Binding ColorHex, Converter={StaticResource HexBrush}}"
+                                            Width="4" HorizontalAlignment="Left" CornerRadius="2"
+                                            Margin="-14,-12,0,-12"/>
+                                    <DockPanel Margin="6,0,0,0">
+                                        <StackPanel DockPanel.Dock="Left" VerticalAlignment="Center" MinWidth="100">
+                                            <StackPanel Orientation="Horizontal">
+                                                <ToggleButton Style="{StaticResource ToggleSwitch}" IsChecked="{Binding IsEnabled}" VerticalAlignment="Center" Margin="0,0,6,0"
+                                                              AutomationProperties.Name="{Binding Name, StringFormat='Enable {0}'}"/>
+                                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="13" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                            <TextBlock Text="{Binding Host}" Foreground="{DynamicResource TextMuted}" FontSize="11" Margin="22,2,0,0"/>
+                                        </StackPanel>
+                                        <Button Content="&#x2715;" DockPanel.Dock="Right" Padding="6,2" FontSize="10"
+                                                VerticalAlignment="Center" Style="{StaticResource GhostButton}"
+                                                ToolTip="Remove target"
+                                                AutomationProperties.Name="{Binding Name, StringFormat='Remove {0}'}"
+                                                Command="{Binding DataContext.RemoveTargetCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                CommandParameter="{Binding}"
+                                                Visibility="{Binding IsCustom, Converter={StaticResource FlexVis}}"/>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                            <StackPanel Margin="0,0,16,0" HorizontalAlignment="Center">
+                                                <TextBlock Text="{Binding LastLatencyMs, StringFormat={}{0:F0} ms, FallbackValue=—}"
+                                                           Foreground="{DynamicResource Info}" FontWeight="Bold" FontSize="13" HorizontalAlignment="Center"/>
+                                                <TextBlock Text="LATENCY" Foreground="{DynamicResource TextSecondary}" FontSize="9" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <StackPanel Margin="0,0,16,0" HorizontalAlignment="Center">
+                                                <TextBlock Text="{Binding AverageMs, StringFormat={}{0:F1}, FallbackValue=—}"
+                                                           Foreground="{DynamicResource TextSecondary}" FontWeight="Bold" FontSize="13" HorizontalAlignment="Center"/>
+                                                <TextBlock Text="AVG" Foreground="{DynamicResource TextSecondary}" FontSize="9" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <StackPanel Margin="0,0,16,0" HorizontalAlignment="Center">
+                                                <TextBlock Text="{Binding JitterMs, StringFormat={}{0:F0}, FallbackValue=—}"
+                                                           Foreground="{DynamicResource Warning}" FontWeight="Bold" FontSize="13" HorizontalAlignment="Center"/>
+                                                <TextBlock Text="JITTER" Foreground="{DynamicResource TextSecondary}" FontSize="9" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <StackPanel HorizontalAlignment="Center">
+                                                <TextBlock Text="{Binding LossPercent, StringFormat={}{0:F0}%}"
+                                                           Foreground="{DynamicResource WarningText}" FontWeight="Bold" FontSize="13" HorizontalAlignment="Center"/>
+                                                <TextBlock Text="LOSS" Foreground="{DynamicResource TextSecondary}" FontSize="9" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </DockPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                    <TextBox Text="{Binding Shared.NewTargetHost, UpdateSourceTrigger=PropertyChanged}" Width="240"
+                             AutomationProperties.Name="New target host"/>
+                    <Button Content="Add target" Command="{Binding AddCustomTargetCommand}" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
+                            AutomationProperties.Name="Add target"/>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- Latency chart -->
+        <Border Grid.Row="3" Style="{StaticResource Card}" Margin="28,16,28,0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <DockPanel Grid.Row="0" Margin="0,0,0,12">
+                    <TextBlock Text="Latency" Style="{StaticResource SectionTitle}"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" DockPanel.Dock="Right" VerticalAlignment="Center">
+                        <TextBlock Text="Ping every" Style="{StaticResource Subtle}" VerticalAlignment="Center"/>
+                        <TextBox Text="{Binding Shared.IntervalSeconds, UpdateSourceTrigger=PropertyChanged}" Width="48" Margin="8,0,6,0" TextAlignment="Center"
+                                 AutomationProperties.Name="Ping interval in seconds"/>
+                        <TextBlock Text="s" Style="{StaticResource Subtle}" VerticalAlignment="Center"/>
+                        <TextBlock Text="Window" Style="{StaticResource Subtle}" VerticalAlignment="Center" Margin="16,0,0,0"/>
+                        <ComboBox SelectedValue="{Binding Shared.WindowSeconds}" ItemsSource="{Binding Shared.WindowOptions}" Width="82" Margin="8,0,0,0"
+                                  AutomationProperties.Name="Chart time window"/>
+                    </StackPanel>
+                </DockPanel>
+                <lvc:CartesianChart Grid.Row="1" Background="Transparent" MinHeight="200"
+                                    Series="{Binding Shared.LatencySeries}"
+                                    XAxes="{Binding Shared.LatencyXAxes}" YAxes="{Binding Shared.LatencyYAxes}"
+                                    LegendPosition="Bottom"
+                                    LegendTextPaint="{Binding Shared.LegendTextPaint}"
+                                    LegendBackgroundPaint="{Binding Shared.LegendBackgroundPaint}"
+                                    TooltipTextPaint="{Binding Shared.TooltipTextPaint}"
+                                    TooltipBackgroundPaint="{Binding Shared.TooltipBackgroundPaint}"/>
+            </Grid>
+        </Border>
+
+    </Grid>
+</UserControl>

@@ -1,0 +1,74 @@
+name: "SysManager CodeQL Configuration"
+
+paths-ignore:
+  - '**/obj/**'
+  - '**/bin/**'
+
+query-filters:
+  # cs/useless-assignment-to-local fires only on build-generated code for this
+  # project: WPF XAML-compiler output (*.g.cs) and the [GeneratedRegex] source
+  # generator, all under obj/. Because the CodeQL database is built (manual build
+  # mode), it traces those generated files into analysis and neither paths-ignore
+  # nor a query-filter "path" key suppresses them for compiled C#. There are zero
+  # hand-written occurrences of this pattern, so excluding the query by id removes
+  # the false positives without losing real coverage. Re-enable this rule (drop the
+  # exclude) if a genuine useless-assignment is ever introduced in source.
+  - exclude:
+      id: cs/useless-assignment-to-local
+  # Intentional use of CreateFromSignedFile for Authenticode verification — no modern
+  # .NET replacement exists without P/Invoke. Used in UpdateService.cs AND
+  # SpeedTestService.cs, both already wrapped in #pragma warning disable SYSLIB0057.
+  # Excluded by id alone: the `path:` key is NOT honoured inside query-filters (only
+  # `id`/`tags` are — see the cs/useless-upcast note below), so a path-scoped exclude
+  # silently covered the whole repo anyway AND would have missed the SpeedTestService
+  # usage if it ever were honoured. There are no other call sites, so id-only is correct.
+  - exclude:
+      id: cs/call-to-obsolete-method
+  # cs/useless-cast-to-self fires only on [GeneratedRegex] source-generator output
+  # under obj/ (RegexGenerator.g.cs). Like cs/useless-assignment-to-local above, the
+  # manual-build CodeQL database traces generated files into analysis. Zero
+  # hand-written occurrences exist.
+  - exclude:
+      id: cs/useless-cast-to-self
+  # cs/useless-upcast misfires on WUApiLib COM interop in WindowsUpdateService: the
+  # update objects are `dynamic` (late-bound COM), so casts like (bool)u.IsDownloaded
+  # or (string)u.Identity.UpdateID are load-bearing runtime conversions from dynamic
+  # to the concrete type the code needs — removing them would propagate `dynamic` and
+  # lose type safety. CodeQL sees the static type as object and reports a self-upcast.
+  # NOTE: the `path:` key is NOT honoured inside query-filters (only `id`/`tags` are),
+  # so a path-scoped exclude silently failed to suppress these. Exclude by id alone —
+  # this rule has zero legitimate hand-written hits across the codebase.
+  - exclude:
+      id: cs/useless-upcast
+  # cs/nested-if-statements is a pure readability suggestion (collapse nested ifs). The
+  # nested forms here read more clearly with their separate guard comments, and the rule
+  # also fires on [GeneratedRegex] source-generator output under obj/. Style, not a defect.
+  - exclude:
+      id: cs/nested-if-statements
+  # cs/path-combine flags Path.Combine arguments that embed a directory separator
+  # (which can silently discard earlier segments). Every occurrence here passes only
+  # separator-free literals ("$Recycle.Bin", "Steam", "drivers"/"etc"/"hosts"), i.e.
+  # textbook-correct usage — the rule has no real finding on this codebase.
+  - exclude:
+      id: cs/path-combine
+  # cs/missed-using-statement misfires on two disposed-elsewhere cases it cannot
+  # trace: EventLogService disposes the EventRecord in a finally across an await
+  # boundary, and DashboardViewModel disposes its CancellationTokenSource fields in
+  # Dispose(). Both are correctly disposed; CodeQL just can't connect the dataflow.
+  - exclude:
+      id: cs/missed-using-statement
+  # cs/catch-of-all-exceptions and cs/empty-catch-block: the project deliberately uses
+  # broad catches as last-resort safety nets in fire-and-forget UI handlers, polling
+  # loops, and best-effort hardware probes — virtually all log via Log.Debug/Warning
+  # or filter with `when`, and the few intentionally-empty catches (cancellation,
+  # absent NVIDIA driver) are documented inline. These are style notes, not defects,
+  # on this WPF/COM-interop codebase.
+  - exclude:
+      id: cs/catch-of-all-exceptions
+  - exclude:
+      id: cs/empty-catch-block
+  # cs/linq/missed-where is a pure style suggestion (use .Where() instead of an `if`
+  # inside foreach). The explicit loops here are clearer for the side-effecting bodies
+  # they contain; no correctness or performance impact.
+  - exclude:
+      id: cs/linq/missed-where
