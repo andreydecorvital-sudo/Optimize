@@ -31,19 +31,21 @@ jobs:
       - name: Build
         run: dotnet build Optimize.sln --configuration Release --no-restore
 
-      - name: Publish Windows x64
+      - name: Publish self-contained Windows x64
         run: >-
           dotnet publish src/Optimize.App/Optimize.App.csproj
           --configuration Release
           --runtime win-x64
-          --self-contained false
+          --self-contained true
           -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true
           -p:DebugType=None
           -p:DebugSymbols=false
 
       - name: Upload portable build
         uses: actions/upload-artifact@v4
         with:
-          name: Optimize-win-x64
+          name: Optimize-win-x64-self-contained
           path: src/Optimize.App/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish/
           if-no-files-found: error
