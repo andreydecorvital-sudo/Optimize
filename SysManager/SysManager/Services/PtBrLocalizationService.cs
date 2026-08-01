@@ -42,7 +42,9 @@ public static class PtBrLocalizationService
             return migrated;
         if (PtBrRuntimePatternCatalog.TryTranslate(text, out migrated))
             return migrated;
-        return PtBrTranslationCatalog.Translate(text);
+
+        var translated = PtBrTranslationCatalog.Translate(text);
+        return PtBrRuntimeFallbackCatalog.Translate(translated);
     }
 
     public static void Attach(Window window)
