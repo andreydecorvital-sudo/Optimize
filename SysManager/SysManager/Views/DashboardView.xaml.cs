@@ -22,15 +22,22 @@ public partial class DashboardView : UserControl
         if (_missionsInjected) return;
         _missionsInjected = true;
 
-        // Keep the large upstream XAML intact while Optimize is being progressively reshaped.
-        // The missions panel is appended to the Dashboard grid and inherits the same DataContext.
+        // Missions are the primary Optimize experience: after the header/admin context,
+        // show what this specific PC should do before exposing raw metrics/tools.
         if (Content is not ScrollViewer { Content: Grid dashboardGrid }) return;
 
-        var rowIndex = dashboardGrid.RowDefinitions.Count;
-        dashboardGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        const int missionRow = 2;
+        dashboardGrid.RowDefinitions.Insert(missionRow, new RowDefinition { Height = GridLength.Auto });
+
+        foreach (UIElement child in dashboardGrid.Children)
+        {
+            var row = Grid.GetRow(child);
+            if (row >= missionRow)
+                Grid.SetRow(child, row + 1);
+        }
 
         var missions = new OptimizeMissionsPanel();
-        Grid.SetRow(missions, rowIndex);
+        Grid.SetRow(missions, missionRow);
         dashboardGrid.Children.Add(missions);
     }
 }
