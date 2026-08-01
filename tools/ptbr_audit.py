@@ -12,13 +12,16 @@ import html
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1] / "SysManager" / "SysManager"
-REPORT = Path(__file__).resolve().parents[1] / "artifacts" / "ptbr-audit.txt"
+REPO = Path(__file__).resolve().parents[1]
+ROOT = REPO / "SysManager" / "SysManager"
+REPORT = REPO / "artifacts" / "ptbr-audit.txt"
+CATALOG = ROOT / "Services" / "PtBrTranslationCatalog.cs"
 
 UI_ATTR = re.compile(
     r'\b(?:Text|Content|Header|ToolTip|AutomationProperties\.Name|Title)="([^"]+)"'
 )
 CS_STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
+CATALOG_KEY = re.compile(r'^\s*\["((?:[^"\\]|\\.)*)"\]\s*=')
 
 ENGLISH_HINTS = {
     "the", "and", "for", "with", "from", "your", "this", "that", "system",
@@ -51,11 +54,27 @@ CS_UI_MARKERS = (
 
 def decode(value: str) -> str:
     value = html.unescape(value)
-    return value.replace("\\n", " ").replace("\\r", " ").replace("\\t", " ").strip()
+    return bytes(value, "utf-8").decode("unicode_escape") if "\\" in value else value.strip()
+
+
+def load_catalog_keys() -> set[str]:
+    if not CATALOG.exists():
+        return set()
+    keys: set[str] = set()
+    for line in CATALOG.read_text(encoding="utf-8", errors="ignore").splitlines():
+        match = CATALOG_KEY.match(line)
+        if match:
+            keys.add(match.group(1).replace('\\"', '"').strip().casefold())
+    return keys
+
+
+TRANSLATED = load_catalog_keys()
 
 
 def skip(text: str) -> bool:
     if not text or text in TECHNICAL_ALLOW:
+        return True
+    if text.casefold() in TRANSLATED:
         return True
     if text.startswith(("{Binding", "{DynamicResource", "{StaticResource", "{x:", "&#x")):
         return True
@@ -81,7 +100,7 @@ def scan_xaml(path: Path) -> list[tuple[int, str]]:
         if line.lstrip().startswith("<!--"):
             continue
         for match in UI_ATTR.finditer(line):
-            text = decode(match.group(1))
+            text = html.unescape(match.group(1)).strip()
             if looks_english(text):
                 findings.append((lineno, text))
     return findings
@@ -89,6 +108,8 @@ def scan_xaml(path: Path) -> list[tuple[int, str]]:
 
 def scan_cs(path: Path) -> list[tuple[int, str]]:
     findings: list[tuple[int, str]] = []
+    if path.name in {"PtBrTranslationCatalog.cs", "PtBrLocalizationService.cs"}:
+        return findings
     for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
         stripped = line.strip()
         if not stripped or stripped.startswith("//") or "Log." in line:
@@ -98,7 +119,7 @@ def scan_cs(path: Path) -> list[tuple[int, str]]:
         if not any(marker in line for marker in CS_UI_MARKERS):
             continue
         for match in CS_STRING.finditer(line):
-            text = decode(match.group(1))
+            text = match.group(1).replace("\\n", " ").replace("\\r", " ").replace("\\t", " ").strip()
             if looks_english(text):
                 findings.append((lineno, text))
     return findings
@@ -120,17 +141,19 @@ def main() -> int:
         "Optimize pt-BR audit",
         "====================",
         f"Possíveis textos visíveis ainda em inglês: {len(all_findings)}",
+        f"Textos cobertos pelo catálogo: {len(TRANSLATED)}",
         "",
     ]
     for path, lineno, text in all_findings:
-        relative = path.relative_to(ROOT.parent.parent)
+        relative = path.relative_to(REPO)
         lines.append(f"{relative}:{lineno}: {text}")
     REPORT.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print(lines[2])
+    print(lines[3])
     print(f"Relatório: {REPORT}")
     if all_findings:
-        for line in lines[4:24]:
+        for line in lines[5:25]:
             print(line)
         if len(all_findings) > 20:
             print(f"... e mais {len(all_findings) - 20} ocorrência(s).")
