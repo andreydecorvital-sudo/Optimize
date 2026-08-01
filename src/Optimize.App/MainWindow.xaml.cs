@@ -6,6 +6,9 @@ namespace Optimize.App;
 
 public partial class MainWindow : Window
 {
+    private const string MaximizeGlyph = "\uE922";
+    private const string RestoreGlyph = "\uE923";
+
     private readonly MainViewModel _viewModel;
 
     public MainWindow()
@@ -25,5 +28,34 @@ public partial class MainWindow : Window
         {
             _viewModel.ScanCommand.Execute(null);
         }
+    }
+
+    private void MinimizeWindow(object sender, RoutedEventArgs eventArgs)
+    {
+        WindowState = WindowState.Minimized;
+    }
+
+    private void ToggleMaximizeWindow(object sender, RoutedEventArgs eventArgs)
+    {
+        WindowState = WindowState == WindowState.Maximized
+            ? WindowState.Normal
+            : WindowState.Maximized;
+    }
+
+    private void CloseWindow(object sender, RoutedEventArgs eventArgs)
+    {
+        Close();
+    }
+
+    private void HandleWindowStateChanged(object? sender, EventArgs eventArgs)
+    {
+        if (MaximizeButton is null)
+        {
+            return;
+        }
+
+        MaximizeButton.Content = WindowState == WindowState.Maximized
+            ? RestoreGlyph
+            : MaximizeGlyph;
     }
 }
