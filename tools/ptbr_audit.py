@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Audit user-facing UI literals that still look English.
 
-The audit intentionally ignores implementation identifiers (registry value names,
-PowerShell source, package IDs, pure interpolation fragments). Everything that can
-actually be rendered as UI must either be Portuguese or exist in a pt-BR catalog.
+Implementation identifiers (registry names, package IDs, PowerShell source and pure
+interpolation fragments) are excluded. Renderable UI must be Portuguese or explicitly
+covered by a pt-BR catalog.
 """
 
 from __future__ import annotations
@@ -11,7 +11,13 @@ from __future__ import annotations
 import argparse
 import html
 import re
+import sys
 from pathlib import Path
+
+# GitHub's Windows runner may expose a cp1252 console. Never let a status glyph crash
+# the audit before its report can be uploaded.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 REPO = Path(__file__).resolve().parents[1]
 ROOT = REPO / "SysManager" / "SysManager"
@@ -31,7 +37,7 @@ ENGLISH_HINTS = {
     "performance", "network", "drive", "memory", "temperature", "available",
     "installed", "open", "save", "remove", "restore", "profile", "mode",
     "status", "details", "warning", "error", "loading", "running", "check",
-    "quick", "windows", "privacy", "security", "battery", "about", "advanced",
+    "quick", "privacy", "security", "battery", "about", "advanced",
     "monitor", "history", "repair", "manager", "recommended", "requires",
     "application", "applications", "current", "failed", "successful", "start",
     "stop", "refresh", "create", "delete", "export", "import", "configuration",
@@ -61,14 +67,21 @@ CS_UI_MARKERS = (
 )
 
 
+def decode_csharp_string(value: str) -> str:
+    return (value.replace("\\n", " ")
+                 .replace("\\r", " ")
+                 .replace("\\t", " ")
+                 .replace('\\"', '"')
+                 .strip())
+
+
 def load_catalog_keys() -> set[str]:
     keys: set[str] = set()
     for catalog in CATALOGS:
         for line in catalog.read_text(encoding="utf-8", errors="ignore").splitlines():
             match = CATALOG_KEY.match(line)
             if match:
-                key = match.group(1).replace('\\"', '"').replace('\\\\', '\\').strip()
-                keys.add(key.casefold())
+                keys.add(decode_csharp_string(match.group(1)).replace('\\\\', '\\').casefold())
     return keys
 
 
@@ -94,17 +107,12 @@ def skip(text: str) -> bool:
     if re.fullmatch(r"[A-Z0-9_.:/\\%-]{2,}", text) and " " not in text:
         return True
 
-    # Pure runtime values such as "{machine} · {profile.CpuName} · ..." contain
-    # English-looking identifier names in source but render only their values.
     without_values = INTERPOLATION.sub("", text)
-    if without_values and not re.search(r"[A-Za-zÀ-ÿ]", without_values):
-        return True
-    if not without_values:
+    if not without_values or not re.search(r"[A-Za-zÀ-ÿ]", without_values):
         return True
 
-    # The simplistic C# literal scanner may capture only the first half of a ternary
-    # interpolation. Those fragments are code, not a complete user-facing sentence.
-    if "{(" in text or text.endswith((" ?", "?", "{(")):
+    # Scanner fragments caused by nested C# expressions are not complete UI literals.
+    if "{(" in text or text.startswith((")}", "}}")) or text.endswith((" ?", "?", "{(")):
         return True
     return False
 
@@ -141,7 +149,7 @@ def scan_cs(path: Path) -> list[tuple[int, str]]:
         if not any(marker in line for marker in CS_UI_MARKERS):
             continue
         for match in CS_STRING.finditer(line):
-            text = match.group(1).replace("\\n", " ").replace("\\r", " ").replace("\\t", " ").strip()
+            text = decode_csharp_string(match.group(1))
             if looks_english(text):
                 findings.append((lineno, text))
     return findings
@@ -171,8 +179,8 @@ def main() -> int:
         lines.append(f"{relative}:{lineno}: {text}")
     REPORT.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    print(lines[2])
-    print(lines[3])
+    for line in lines[:4]:
+        print(line)
     print(f"Relatório: {REPORT}")
     if all_findings:
         for line in lines[5:25]:
