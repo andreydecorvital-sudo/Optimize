@@ -5,21 +5,20 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 
 namespace SysManager.Services;
 
 /// <summary>
-/// Camada de localização pt-BR usada durante a transformação do SysManager em Optimize.
-/// Mantém IDs técnicos e nomes de tecnologias, traduzindo somente textos voltados ao usuário.
-/// A migração futura deve mover os textos para ResourceDictionary/RESX por idioma.
+/// Camada temporária de localização pt-BR usada durante a transformação do
+/// SysManager em Optimize. Uma etapa futura moverá os textos para recursos
+/// de idioma (RESX/ResourceDictionary) sem alterar a lógica do aplicativo.
 /// </summary>
 public static class PtBrLocalizationService
 {
     private static readonly Dictionary<string, string> Exact = new(StringComparer.OrdinalIgnoreCase)
     {
-        // Shell
+        // Shell e ações comuns
         ["SysManager"] = "Optimize",
         ["System toolkit"] = "Ferramentas do sistema",
         ["Administrator"] = "Administrador",
@@ -65,7 +64,7 @@ public static class PtBrLocalizationService
         ["Never"] = "Nunca",
         ["Today"] = "Hoje",
 
-        // Navigation groups
+        // Grupos de navegação
         ["Dashboard"] = "Visão geral",
         ["System"] = "Sistema",
         ["Gaming & Profiles"] = "Jogos e perfis",
@@ -79,7 +78,7 @@ public static class PtBrLocalizationService
         ["Info"] = "Informações",
         ["Advanced"] = "Avançado",
 
-        // Navigation items
+        // Itens de navegação
         ["System Health"] = "Saúde do sistema",
         ["Windows Update"] = "Windows Update",
         ["Performance Mode"] = "Modo de desempenho",
@@ -138,8 +137,7 @@ public static class PtBrLocalizationService
         ["CLI Interface"] = "Interface de linha de comando",
         ["Environment Variables"] = "Variáveis de ambiente",
 
-        // Common dashboard / diagnostic vocabulary
-        ["System Health"] = "Saúde do sistema",
+        // Vocabulário de diagnóstico
         ["Health"] = "Saúde",
         ["CPU"] = "CPU",
         ["GPU"] = "GPU",
@@ -150,7 +148,6 @@ public static class PtBrLocalizationService
         ["Processes"] = "Processos",
         ["Startup"] = "Inicialização",
         ["Updates"] = "Atualizações",
-        ["Drivers"] = "Drivers",
         ["Performance"] = "Desempenho",
         ["Power"] = "Energia",
         ["Security"] = "Segurança",
@@ -210,6 +207,7 @@ public static class PtBrLocalizationService
     public static string Translate(string? text)
     {
         if (string.IsNullOrWhiteSpace(text)) return text ?? string.Empty;
+
         var trimmed = text.Trim();
         if (Exact.TryGetValue(trimmed, out var translated))
             return PreserveOuterWhitespace(text, translated);
@@ -224,14 +222,10 @@ public static class PtBrLocalizationService
     {
         ConfigureCulture();
 
-        window.Loaded += (_, _) =>
-        {
-            TranslateWindow(window);
-            window.Title = Translate(window.Title);
-        };
+        window.Loaded += (_, _) => TranslateWindow(window);
 
-        // Views são criadas de forma lazy. Capturar Loaded no shell permite traduzir
-        // controles das páginas conforme o usuário as abre, sem materializar 50+ VMs no startup.
+        // As views são lazy. O shell recebe Loaded dos controles à medida que cada
+        // página é aberta e traduz somente a árvore visual que acabou de aparecer.
         window.AddHandler(FrameworkElement.LoadedEvent,
             new RoutedEventHandler((_, e) =>
             {
@@ -244,14 +238,17 @@ public static class PtBrLocalizationService
     {
         TranslateVisualTree(window);
         if (window.DataContext is ViewModels.MainWindowViewModel vm)
-        {
             window.Title = vm.IsElevated ? "Optimize — Administrador" : "Optimize";
-        }
+        else
+            window.Title = Translate(window.Title);
     }
 
     private static void TranslateVisualTree(DependencyObject root)
     {
         TranslateElement(root);
+
+        if (root is not Visual && root is not System.Windows.Media.Media3D.Visual3D)
+            return;
 
         var count = VisualTreeHelper.GetChildrenCount(root);
         for (var i = 0; i < count; i++)
