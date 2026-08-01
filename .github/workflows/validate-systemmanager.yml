@@ -22,11 +22,14 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: Restore
+      - name: Restore solution
         run: dotnet restore SysManager/SysManager.sln
 
       - name: Build application
         run: dotnet build SysManager/SysManager/SysManager.csproj --configuration Release --no-restore
+
+      - name: Restore Windows x64 runtime
+        run: dotnet restore SysManager/SysManager/SysManager.csproj --runtime win-x64
 
       - name: Publish portable Windows x64
         run: >-
