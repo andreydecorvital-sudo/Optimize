@@ -15,10 +15,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 ROOT = REPO / "SysManager" / "SysManager"
 REPORT = REPO / "artifacts" / "ptbr-audit.txt"
-CATALOGS = [
-    ROOT / "Services" / "PtBrTranslationCatalog.cs",
-    ROOT / "Services" / "PtBrMigrationCatalog.cs",
-]
+CATALOGS = sorted((ROOT / "Services").glob("PtBr*Catalog*.cs"))
 
 UI_ATTR = re.compile(
     r'\b(?:Text|Content|Header|ToolTip|AutomationProperties\.Name|Title)="([^"]+)"'
@@ -38,7 +35,7 @@ ENGLISH_HINTS = {
     "monitor", "history", "repair", "manager", "recommended", "requires",
     "application", "applications", "current", "failed", "successful", "start",
     "stop", "refresh", "create", "delete", "export", "import", "configuration",
-    "cancel", "failed", "cannot", "completed", "ready", "folder", "selected",
+    "cancel", "cannot", "completed", "ready", "folder", "selected", "list",
 }
 
 TECHNICAL_ALLOW = {
@@ -60,8 +57,6 @@ CS_UI_MARKERS = (
 def load_catalog_keys() -> set[str]:
     keys: set[str] = set()
     for catalog in CATALOGS:
-        if not catalog.exists():
-            continue
         for line in catalog.read_text(encoding="utf-8", errors="ignore").splitlines():
             match = CATALOG_KEY.match(line)
             if match:
@@ -91,6 +86,8 @@ def skip(text: str) -> bool:
         return True
     if "\\Software\\" in text or text.startswith(("HKCU", "HKLM", "HKEY_")):
         return True
+    if any(token in text for token in ("Get-NetAdapter", "Get-ComputerRestorePoint", "Checkpoint-Computer")):
+        return True
     return False
 
 
@@ -115,7 +112,7 @@ def scan_xaml(path: Path) -> list[tuple[int, str]]:
 
 def scan_cs(path: Path) -> list[tuple[int, str]]:
     findings: list[tuple[int, str]] = []
-    if path.name in {"PtBrTranslationCatalog.cs", "PtBrLocalizationService.cs", "PtBrMigrationCatalog.cs"}:
+    if path.name.startswith("PtBr"):
         return findings
     for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
         stripped = line.strip()
