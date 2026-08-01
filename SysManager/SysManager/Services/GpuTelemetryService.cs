@@ -11,7 +11,7 @@ namespace SysManager.Services;
 /// <summary>
 /// Reads live GPU telemetry without assuming a specific vendor or model.
 /// LibreHardwareMonitor is the primary source for NVIDIA, AMD and Intel GPUs; WMI supplies
-/// adapter identity/VRAM as a fallback. A missing sensor is represented as null, never guessed.
+/// adapter identity as a fallback. A missing sensor is represented as null, never guessed.
 /// </summary>
 public sealed class GpuTelemetryService : IDisposable
 {
@@ -19,7 +19,7 @@ public sealed class GpuTelemetryService : IDisposable
     private Computer? _computer;
     private bool _openFailed;
     private bool _disposed;
-    private IReadOnlyList<(string Name, GpuVendor Vendor, double? MemoryGB)>? _wmiAdapters;
+    private IReadOnlyList<(string Name, GpuVendor Vendor)>? _wmiAdapters;
 
     public Task<IReadOnlyList<GpuTelemetry>> ReadAsync(CancellationToken ct = default)
         => Task.Run(Read, ct);
@@ -32,18 +32,10 @@ public sealed class GpuTelemetryService : IDisposable
 
             var fallback = _wmiAdapters ??= ReadWmiAdapters();
             var live = ReadLibreHardwareMonitor();
-            if (live.Count == 0)
-            {
-                return fallback.Select(a => new GpuTelemetry(
-                    a.Name, a.Vendor, null, null, null, a.MemoryGB)).ToList();
-            }
+            if (live.Count > 0) return live;
 
-            // Enrich LHM entries with the closest WMI adapter's static VRAM value when possible.
-            return live.Select(g =>
-            {
-                var wmi = fallback.FirstOrDefault(a => NamesLikelyMatch(a.Name, g.Name) || a.Vendor == g.Vendor);
-                return g with { MemoryTotalGB = g.MemoryTotalGB ?? wmi.MemoryGB };
-            }).ToList();
+            return fallback.Select(a => new GpuTelemetry(
+                a.Name, a.Vendor, null, null, null, null)).ToList();
         }
     }
 
@@ -77,23 +69,6 @@ public sealed class GpuTelemetryService : IDisposable
                     .OrderByDescending(s => IsGpuCoreName(s.Name))
                     .FirstOrDefault();
 
-                // LHM exposes memory differently between GPU backends/driver generations.
-                // Only consume values when their sensor name clearly states Used/Total;
-                // unknown units are ignored rather than converted speculatively.
-                double? usedGb = null;
-                double? totalGb = null;
-                foreach (var sensor in sensors.Where(s => s.Value.HasValue))
-                {
-                    if (sensor.SensorType is not (SensorType.Data or SensorType.SmallData)) continue;
-                    var name = sensor.Name;
-                    if (!name.Contains("Memory", StringComparison.OrdinalIgnoreCase) &&
-                        !name.Contains("VRAM", StringComparison.OrdinalIgnoreCase)) continue;
-
-                    // Data sensors in LibreHardwareMonitor use GB for these GPU-memory metrics.
-                    if (name.Contains("Used", StringComparison.OrdinalIgnoreCase)) usedGb = sensor.Value;
-                    if (name.Contains("Total", StringComparison.OrdinalIgnoreCase)) totalGb = sensor.Value;
-                }
-
                 result.Add(new GpuTelemetry(
                     hardware.Name,
                     hardware.HardwareType switch
@@ -105,14 +80,14 @@ public sealed class GpuTelemetryService : IDisposable
                     },
                     load?.Value,
                     temp?.Value,
-                    usedGb,
-                    totalGb));
+                    MemoryUsedGB: null,
+                    MemoryTotalGB: null));
             }
         }
         catch (Exception ex)
         {
-            // Some machines/drivers refuse sensor initialization without elevation. Do not keep
-            // hammering native initialization every 300 ms; fall back to WMI identity instead.
+            // Some machines/drivers refuse sensor initialization. Do not keep hammering native
+            // initialization every polling interval; fall back to WMI identity instead.
             _openFailed = true;
             Log.Debug("Optimize cross-vendor GPU telemetry unavailable: {Error}", ex.Message);
             try { _computer?.Close(); } catch { /* best effort */ }
@@ -137,30 +112,19 @@ public sealed class GpuTelemetryService : IDisposable
            name.Equals("GPU", StringComparison.OrdinalIgnoreCase) ||
            name.Contains("Core", StringComparison.OrdinalIgnoreCase);
 
-    private static IReadOnlyList<(string Name, GpuVendor Vendor, double? MemoryGB)> ReadWmiAdapters()
+    private static IReadOnlyList<(string Name, GpuVendor Vendor)> ReadWmiAdapters()
     {
-        List<(string Name, GpuVendor Vendor, double? MemoryGB)> result = [];
+        List<(string Name, GpuVendor Vendor)> result = [];
         try
         {
-            using var searcher = new ManagementObjectSearcher(
-                "SELECT Name,AdapterRAM FROM Win32_VideoController");
+            using var searcher = new ManagementObjectSearcher("SELECT Name FROM Win32_VideoController");
             using var collection = searcher.Get();
             foreach (ManagementObject mo in collection)
             {
                 using (mo)
                 {
                     var name = mo["Name"]?.ToString()?.Trim() ?? "GPU desconhecida";
-                    double? memory = null;
-                    try
-                    {
-                        var bytes = Convert.ToUInt64(mo["AdapterRAM"] ?? 0UL);
-                        if (bytes > 0) memory = Math.Round(bytes / 1024d / 1024d / 1024d, 1);
-                    }
-                    catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException)
-                    {
-                        memory = null;
-                    }
-                    result.Add((name, DetectVendor(name), memory));
+                    result.Add((name, DetectVendor(name)));
                 }
             }
         }
@@ -181,18 +145,6 @@ public sealed class GpuTelemetryService : IDisposable
             name.Contains("Iris", StringComparison.OrdinalIgnoreCase) || name.Contains("UHD", StringComparison.OrdinalIgnoreCase))
             return GpuVendor.Intel;
         return GpuVendor.Other;
-    }
-
-    private static bool NamesLikelyMatch(string a, string b)
-    {
-        static string Normalize(string value) => new(value
-            .Where(char.IsLetterOrDigit)
-            .Select(char.ToUpperInvariant)
-            .ToArray());
-
-        var na = Normalize(a);
-        var nb = Normalize(b);
-        return na.Contains(nb, StringComparison.Ordinal) || nb.Contains(na, StringComparison.Ordinal);
     }
 
     public void Dispose()
