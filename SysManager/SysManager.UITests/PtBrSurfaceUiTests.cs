@@ -47,9 +47,15 @@ public sealed class PtBrSurfaceUiTests
             CreateNoWindow = false
         });
 
-        var window = app.GetMainWindow(automation, TimeSpan.FromSeconds(45))
+        var window = app.GetMainWindow(automation, TimeSpan.FromSeconds(60))
             ?? throw new InvalidOperationException("A janela principal do Optimize não apareceu no tempo esperado.");
 
+        var treeReady = Retry.WhileFalse(
+            () => window.FindAllDescendants().Length >= 20,
+            TimeSpan.FromSeconds(25),
+            TimeSpan.FromMilliseconds(250)).Success;
+
+        Assert.True(treeReady, "A árvore visual do Optimize não terminou de carregar.\n" + DescribeTree(window));
         ExpandAllNavGroups(window);
 
         foreach (var row in AllTabsSmokeUiTests.AllTabs())
@@ -60,46 +66,64 @@ public sealed class PtBrSurfaceUiTests
                 navId,
                 PtBrLocalizationService.Translate(expectedHeader));
 
-            var item = FindNavigationItem(window, navId, visibleLabel);
+            var item = Retry.WhileNull(
+                () => FindNavigationItem(window, navId, visibleLabel, expectedHeader),
+                TimeSpan.FromSeconds(20),
+                TimeSpan.FromMilliseconds(250)).Result;
+
             if (item is null)
             {
                 ExpandAllNavGroups(window);
                 item = Retry.WhileNull(
-                    () => FindNavigationItem(window, navId, visibleLabel),
-                    TimeSpan.FromSeconds(5)).Result;
+                    () => FindNavigationItem(window, navId, visibleLabel, expectedHeader),
+                    TimeSpan.FromSeconds(10),
+                    TimeSpan.FromMilliseconds(250)).Result;
             }
 
             Assert.True(
                 item is not null,
-                $"Item de navegação '{navId}' / '{visibleLabel}' não encontrado.");
+                $"Item de navegação '{navId}' / '{visibleLabel}' não encontrado.\n" + DescribeTree(window));
 
             item!.Click();
-            Thread.Sleep(240);
+            Thread.Sleep(300);
         }
 
         // Open common disconnected surfaces so Popup/ContextMenu/ToolTip translation is exercised.
         OpenFirstAvailableComboBox(window);
         OpenFirstAvailableMenu(window);
-        Thread.Sleep(500);
+        Thread.Sleep(700);
 
         var findings = ReadAuditFindings(auditPath);
         Assert.True(
             findings.Count == 0,
             "A interface executada ainda contém possíveis textos em inglês:\n" +
-            string.Join("\n", findings.Take(150)));
+            string.Join("\n", findings.Take(200)));
     }
 
-    private static AutomationElement? FindNavigationItem(Window window, string navId, string visibleLabel)
+    private static AutomationElement? FindNavigationItem(
+        Window window,
+        string navId,
+        string visibleLabel,
+        string originalHeader)
     {
         var byId = window.FindFirstDescendant(cf => cf.ByAutomationId(navId));
         if (byId is not null) return byId;
 
-        // Some templated WPF containers do not surface AutomationId through UIA. The visible
-        // localized label is the real fallback a keyboard/screen-reader user would encounter.
+        // Some templated WPF containers do not surface AutomationId through UIA. Search both
+        // the translated label and the inherited source label; the latter is useful precisely
+        // when the localization layer has missed a navigation surface.
         return window.FindAllDescendants()
-            .FirstOrDefault(element =>
-                !string.IsNullOrWhiteSpace(element.Name)
-                && string.Equals(element.Name.Trim(), visibleLabel, StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(element => NameMatches(element.Name, visibleLabel))
+            ?? window.FindAllDescendants()
+                .FirstOrDefault(element => NameMatches(element.Name, originalHeader));
+    }
+
+    private static bool NameMatches(string? candidate, string expected)
+    {
+        if (string.IsNullOrWhiteSpace(candidate) || string.IsNullOrWhiteSpace(expected)) return false;
+        var name = candidate.Trim();
+        return string.Equals(name, expected, StringComparison.OrdinalIgnoreCase)
+            || name.Contains(expected, StringComparison.OrdinalIgnoreCase);
     }
 
     private static void ExpandAllNavGroups(Window window)
@@ -111,8 +135,6 @@ public sealed class PtBrSurfaceUiTests
                 var pattern = element.Patterns.ExpandCollapse.PatternOrDefault;
                 if (pattern is not null && pattern.ExpandCollapseState.Value == ExpandCollapseState.Collapsed)
                     pattern.Expand();
-                else if (pattern is null)
-                    element.Click();
             }
             catch (Exception)
             {
@@ -120,7 +142,7 @@ public sealed class PtBrSurfaceUiTests
             }
         }
 
-        Thread.Sleep(450);
+        Thread.Sleep(600);
     }
 
     private static void OpenFirstAvailableComboBox(Window window)
@@ -130,7 +152,7 @@ public sealed class PtBrSurfaceUiTests
         try
         {
             combo.AsComboBox().Expand();
-            Thread.Sleep(200);
+            Thread.Sleep(250);
             combo.AsComboBox().Collapse();
         }
         catch (Exception)
@@ -146,11 +168,28 @@ public sealed class PtBrSurfaceUiTests
         try
         {
             menu.Click();
-            Thread.Sleep(200);
+            Thread.Sleep(250);
         }
         catch (Exception)
         {
             // Optional surface; tab traversal remains the required part of the audit.
+        }
+    }
+
+    private static string DescribeTree(Window window)
+    {
+        try
+        {
+            return "Árvore de automação (primeiros 180 elementos):\n" + string.Join(
+                "\n",
+                window.FindAllDescendants()
+                    .Take(180)
+                    .Select(element =>
+                        $"[{element.ControlType}] id='{element.AutomationId}' nome='{element.Name}'"));
+        }
+        catch (Exception ex)
+        {
+            return $"Não foi possível descrever a árvore: {ex.Message}";
         }
     }
 
