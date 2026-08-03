@@ -1,0 +1,194 @@
+// SysManager · OperationLockServiceEdgeCaseTests
+// Author: laurentiu021 · https://github.com/laurentiu021/SystemManager
+// License: MIT
+using SysManager.Services;
+
+namespace SysManager.Tests;
+
+[Collection("OperationLock")]
+public class OperationLockServiceEdgeCaseTests
+{
+    private static OperationLockService Service => OperationLockService.Instance;
+
+    [Fact]
+    public void TryAcquire_SameCategory_ReturnNull()
+    {
+        using var handle = Service.TryAcquire(OperationCategory.Network, "Test1");
+        Assert.NotNull(handle);
+
+        var handle2 = Service.TryAcquire(OperationCategory.Network, "Test2");
+        Assert.Null(handle2);
+    }
+
+    [Fact]
+    public void TryAcquire_DifferentCategories_BothSucceed()
+    {
+        using var h1 = Service.TryAcquire(OperationCategory.Disk, "DiskOp");
+        using var h2 = Service.TryAcquire(OperationCategory.Network, "NetOp");
+        Assert.NotNull(h1);
+        Assert.NotNull(h2);
+    }
+
+    [Fact]
+    public void Dispose_Handle_ReleasesLock()
+    {
+        var h1 = Service.TryAcquire(OperationCategory.SystemModification, "Op1");
+        Assert.NotNull(h1);
+        h1.Dispose();
+
+        var h2 = Service.TryAcquire(OperationCategory.SystemModification, "Op2");
+        Assert.NotNull(h2);
+        h2!.Dispose();
+    }
+
+    [Fact]
+    public void Dispose_DoubleDispose_NoThrow()
+    {
+        var handle = Service.TryAcquire(OperationCategory.Disk, "DoubleDispose");
+        Assert.NotNull(handle);
+        handle.Dispose();
+        handle.Dispose(); // should not throw
+    }
+
+    [Fact]
+    public void IsLocked_WhenAcquired_ReturnsTrue()
+    {
+        using var handle = Service.TryAcquire(OperationCategory.Network, "LockCheck");
+        Assert.NotNull(handle);
+        Assert.True(Service.IsLocked(OperationCategory.Network));
+    }
+
+    [Fact]
+    public void IsLocked_WhenReleased_ReturnsFalse()
+    {
+        var handle = Service.TryAcquire(OperationCategory.Disk, "Released");
+        Assert.NotNull(handle);
+        handle.Dispose();
+        Assert.False(Service.IsLocked(OperationCategory.Disk));
+    }
+
+    [Fact]
+    public void GetActiveOperationName_WhenLocked_ReturnsName()
+    {
+        using var handle = Service.TryAcquire(OperationCategory.SystemModification, "MyOp");
+        Assert.NotNull(handle);
+        Assert.Equal("MyOp", Service.GetActiveOperationName(OperationCategory.SystemModification));
+    }
+
+    [Fact]
+    public void GetActiveOperationName_WhenFree_ReturnsNull()
+    {
+        // Ensure released
+        var handle = Service.TryAcquire(OperationCategory.Disk, "TempOp");
+        handle?.Dispose();
+        Assert.Null(Service.GetActiveOperationName(OperationCategory.Disk));
+    }
+
+    [Fact]
+    public void HasActiveOperations_NoLocks_ReturnsFalse()
+    {
+        // Release all possible locks first
+        var h1 = Service.TryAcquire(OperationCategory.Disk, "temp");
+        h1?.Dispose();
+        var h2 = Service.TryAcquire(OperationCategory.Network, "temp");
+        h2?.Dispose();
+        var h3 = Service.TryAcquire(OperationCategory.SystemModification, "temp");
+        h3?.Dispose();
+
+        Assert.False(Service.HasActiveOperations);
+    }
+
+    [Fact]
+    public void HasActiveOperations_WithLock_ReturnsTrue()
+    {
+        using var handle = Service.TryAcquire(OperationCategory.Network, "Active");
+        Assert.NotNull(handle);
+        Assert.True(Service.HasActiveOperations);
+    }
+
+    [Fact]
+    public void ActiveOperations_ReturnsSnapshot()
+    {
+        using var handle = Service.TryAcquire(OperationCategory.Disk, "SnapshotOp");
+        Assert.NotNull(handle);
+
+        var ops = Service.ActiveOperations;
+        Assert.Contains(ops, o => o.Category == OperationCategory.Disk && o.Info.Name == "SnapshotOp");
+    }
+
+    [Fact]
+    public void PropertyChanged_FiredOnAcquire()
+    {
+        var changed = new List<string>();
+        void handler(object? _, System.ComponentModel.PropertyChangedEventArgs e) => changed.Add(e.PropertyName!);
+        Service.PropertyChanged += handler;
+
+        try
+        {
+            var handle = Service.TryAcquire(OperationCategory.Disk, "PropChanged");
+            Assert.NotNull(handle);
+            handle.Dispose();
+
+            Assert.Contains("ActiveOperations", changed);
+            Assert.Contains("HasActiveOperations", changed);
+        }
+        finally
+        {
+            Service.PropertyChanged -= handler;
+        }
+    }
+
+    [Fact]
+    public void TryAcquire_PropertyChangedThrows_DoesNotDeadlockCategory()
+    {
+        // Regression: if a PropertyChanged subscriber throws, TryAcquire must roll back
+        // the entry it added — otherwise the category would be locked forever (no handle
+        // was returned, so the caller can never Release it).
+        void throwingHandler(object? _, System.ComponentModel.PropertyChangedEventArgs __)
+            => throw new InvalidOperationException("subscriber boom");
+
+        // Make sure the category starts free.
+        Service.TryAcquire(OperationCategory.SystemModification, "preClean")?.Dispose();
+
+        Service.PropertyChanged += throwingHandler;
+        try
+        {
+            Assert.Throws<InvalidOperationException>(
+                () => Service.TryAcquire(OperationCategory.SystemModification, "WillThrow"));
+        }
+        finally
+        {
+            Service.PropertyChanged -= throwingHandler;
+        }
+
+        // The category must NOT be stuck locked — a fresh acquire has to succeed.
+        Assert.False(Service.IsLocked(OperationCategory.SystemModification));
+        using var handle = Service.TryAcquire(OperationCategory.SystemModification, "AfterRollback");
+        Assert.NotNull(handle);
+    }
+
+    [Fact]
+    public async Task ConcurrentAcquire_OnlyOneSucceeds()
+    {
+        // Release any existing network lock
+        var existing = Service.TryAcquire(OperationCategory.Network, "preClean");
+        existing?.Dispose();
+
+        int successCount = 0;
+        var handles = new List<OperationLockService.OperationHandle?>();
+        var lockObj = new object();
+
+        var tasks = Enumerable.Range(0, 10).Select(i => Task.Run(() =>
+        {
+            var h = Service.TryAcquire(OperationCategory.Network, $"Concurrent-{i}");
+            lock (lockObj) { handles.Add(h); }
+            if (h != null) Interlocked.Increment(ref successCount);
+        }));
+
+        await Task.WhenAll(tasks);
+
+        Assert.Equal(1, successCount);
+
+        foreach (var h in handles) h?.Dispose();
+    }
+}

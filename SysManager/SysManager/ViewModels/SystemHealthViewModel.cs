@@ -1,0 +1,420 @@
+// SysManager · SystemHealthViewModel
+// Author: laurentiu021 · https://github.com/laurentiu021/SystemManager
+// License: MIT
+
+using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.IO;
+using System.Text.RegularExpressions;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Serilog;
+using SysManager.Helpers;
+using SysManager.Models;
+using SysManager.Services;
+
+namespace SysManager.ViewModels;
+
+public sealed partial class SystemHealthViewModel : ViewModelBase
+{
+    private readonly SystemInfoService _sys;
+    private readonly DiskHealthService _diskHealth;
+    private readonly MemoryTestService _memTest;
+    private readonly FixedDriveService _drives;
+    private readonly IPowerShellRunner _runner;
+    private readonly BiosService _biosService;
+    private CancellationTokenSource? _cts;
+
+    public BulkObservableCollection<MemoryModule> Modules { get; } = new();
+    public BulkObservableCollection<DiskInfo> Disks { get; } = new();
+    public BulkObservableCollection<DiskHealthReport> DiskHealth { get; } = new();
+    public BulkObservableCollection<DriveTarget> ChkdskDrives { get; } = new();
+
+    public ConsoleViewModel Console { get; } = new();
+
+    [ObservableProperty] private OsInfo? _os;
+    [ObservableProperty] private CpuInfo? _cpu;
+    [ObservableProperty] private MemoryInfo? _memory;
+    [ObservableProperty] private string _summary = "Press 'Scan' to collect system info";
+    [ObservableProperty] private bool _isElevated;
+    [ObservableProperty] private bool _isChkdskRunning;
+    [ObservableProperty] private string _chkdskStatus = string.Empty;
+
+    // Memory diagnostic summary
+    [ObservableProperty] private int _wheaMemoryErrors;
+    [ObservableProperty] private int _memoryDiagnosticResults;
+    [ObservableProperty] private string _memoryHealthVerdict = "Click 'Check memory errors' to inspect.";
+    [ObservableProperty] private string _memoryHealthColorHex = StatusColors.Neutral;
+
+    // BIOS / firmware (read-only); populated on Scan.
+    [ObservableProperty] private BiosInfo? _bios;
+
+    public SystemHealthViewModel(SystemInfoService sys, DiskHealthService diskHealth, MemoryTestService memTest, FixedDriveService drives, IPowerShellRunner runner, BiosService biosService)
+    {
+        _sys = sys;
+        _diskHealth = diskHealth;
+        _memTest = memTest;
+        _drives = drives;
+        _runner = runner;
+        _biosService = biosService;
+        IsElevated = AdminHelper.IsElevated();
+        _runner.LineReceived += OnRunnerLineReceived;
+
+        InitializeAsync(InitAsync);
+    }
+
+    private void OnRunnerLineReceived(PowerShellLine l) => Console.Append(l);
+
+    private async Task InitAsync()
+    {
+        try { await RefreshDrivesAsync(); }
+        catch (IOException ex) { Log.Warning("System health drive discovery failed: {Error}", ex.Message); }
+        catch (UnauthorizedAccessException ex) { Log.Warning("System health drive discovery failed: {Error}", ex.Message); }
+        catch (InvalidOperationException ex) { Log.Warning("System health drive discovery failed: {Error}", ex.Message); }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _runner.LineReceived -= OnRunnerLineReceived;
+            _cts?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    [RelayCommand]
+    private async Task ScanAsync()
+    {
+        IsBusy = true;
+        IsProgressIndeterminate = true;
+        StatusMessage = "Collecting system info...";
+        try
+        {
+            var snap = await _sys.CaptureAsync();
+            Os = snap.Os;
+            Cpu = snap.Cpu;
+            Memory = snap.Memory;
+            Modules.ReplaceWith(snap.Memory.Modules);
+            Disks.ReplaceWith(snap.Disks);
+            // BIOS read hits blocking WMI/registry — keep it off the UI thread.
+            Bios = await Task.Run(_biosService.Read);
+            Summary = $"OS {snap.Os.Caption}  —  CPU {snap.Cpu.Name} ({snap.Cpu.Cores}c/{snap.Cpu.LogicalProcessors}t)  —  RAM {snap.Memory.UsedGB:0.0}/{snap.Memory.TotalGB:0.0} GB  —  Disks {snap.Disks.Count}";
+            StatusMessage = $"Scan at {snap.CapturedAt:HH:mm:ss}";
+            ToastService.Instance.Show("System Health scan complete", $"{snap.Disks.Count} disks, {snap.Memory.Modules.Count} RAM modules");
+            Log.Information("System health scan completed");
+            await RefreshDrivesAsync();
+        }
+        catch (System.Management.ManagementException ex) { StatusMessage = $"Scan failed: {ex.Message}"; }
+        catch (InvalidOperationException ex) { StatusMessage = $"Scan failed: {ex.Message}"; }
+        finally { IsBusy = false; IsProgressIndeterminate = false; }
+    }
+
+    /// <summary>Opens the motherboard manufacturer's support page (or a web search) for BIOS updates.</summary>
+    [RelayCommand]
+    private void OpenBiosSupport()
+    {
+        var url = BiosService.SupportUrl(Bios?.BoardManufacturer ?? "", Bios?.BoardProduct ?? "");
+        try
+        {
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true })?.Dispose();
+            StatusMessage = "Opened the manufacturer support page in your browser.";
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            Log.Warning("Could not open BIOS support page: {Error}", ex.Message);
+            StatusMessage = "Couldn't open the browser.";
+        }
+    }
+
+    /// <summary>Copies the motherboard model + BIOS version to the clipboard for support searches.</summary>
+    [RelayCommand]
+    private void CopyBiosInfo()
+    {
+        if (Bios is null) { StatusMessage = "Run a scan first."; return; }
+        var text = $"{Bios.BoardDisplay} — BIOS {Bios.Version} ({Bios.ReleaseDate})".Trim();
+        try
+        {
+            System.Windows.Clipboard.SetText(text);
+            StatusMessage = "BIOS info copied to clipboard.";
+        }
+        catch (System.Runtime.InteropServices.ExternalException ex)
+        {
+            Log.Debug("Clipboard locked: {Error}", ex.Message);
+            StatusMessage = "Couldn't copy: the clipboard is in use.";
+        }
+    }
+
+    [RelayCommand]
+    private async Task RefreshDrivesAsync()
+    {
+        try
+        {
+            var list = await _drives.EnumerateAsync();
+            ChkdskDrives.ReplaceWith(list.Select(d => new DriveTarget
+            {
+                Letter = d.Letter,
+                Label = d.Label,
+                FileSystem = d.FileSystem,
+                SizeGB = d.SizeGB,
+                FreeGB = d.FreeGB,
+                MediaType = d.MediaType,
+                BusType = d.BusType,
+                IsSelected = string.Equals(d.Letter, "C:", StringComparison.OrdinalIgnoreCase),
+                Status = "Idle"
+            }));
+        }
+        catch (IOException ex) { StatusMessage = $"Drive enumeration failed: {ex.Message}"; }
+        catch (UnauthorizedAccessException ex) { StatusMessage = $"Drive enumeration failed: {ex.Message}"; }
+        catch (InvalidOperationException ex) { StatusMessage = $"Drive enumeration failed: {ex.Message}"; }
+    }
+
+    [RelayCommand]
+    private async Task CheckDiskHealthAsync()
+    {
+        IsBusy = true;
+        IsProgressIndeterminate = true;
+        StatusMessage = "Reading SMART data...";
+        try
+        {
+            var reports = await _diskHealth.CollectAsync();
+            DiskHealth.ReplaceWith(reports);
+            StatusMessage = $"Collected {reports.Count} disk report(s).";
+        }
+        catch (System.Management.ManagementException ex) { StatusMessage = $"CheckDiskHealth failed: {ex.Message}"; }
+        catch (InvalidOperationException ex) { StatusMessage = $"CheckDiskHealth failed: {ex.Message}"; }
+        finally { IsBusy = false; IsProgressIndeterminate = false; }
+    }
+
+    [RelayCommand]
+    private async Task CheckMemoryErrorsAsync()
+    {
+        IsBusy = true;
+        IsProgressIndeterminate = true;
+        StatusMessage = "Scanning event log for memory errors...";
+        try
+        {
+            var summary = await _memTest.CheckErrorLogsAsync();
+            WheaMemoryErrors = summary.WheaMemoryErrors;
+            MemoryDiagnosticResults = summary.MemoryDiagnosticResults;
+
+            if (summary.WheaMemoryErrors > 0)
+            {
+                MemoryHealthVerdict = $"{summary.WheaMemoryErrors} hardware-error event(s) in the last 30 days. Test your RAM.";
+                MemoryHealthColorHex = StatusColors.Bad;
+            }
+            else if (summary.MemoryDiagnosticResults > 0)
+            {
+                MemoryHealthVerdict = $"Memory diagnostic has run {summary.MemoryDiagnosticResults} time(s) recently. Check results.";
+                MemoryHealthColorHex = StatusColors.Warning;
+            }
+            else
+            {
+                MemoryHealthVerdict = "No memory errors reported in the last 30 days.";
+                MemoryHealthColorHex = StatusColors.Good;
+            }
+            StatusMessage = "Memory scan done.";
+        }
+        catch (System.Diagnostics.Eventing.Reader.EventLogException ex) { StatusMessage = $"CheckMemoryErrors failed: {ex.Message}"; }
+        catch (UnauthorizedAccessException ex) { StatusMessage = $"CheckMemoryErrors failed: {ex.Message}"; }
+        finally { IsBusy = false; IsProgressIndeterminate = false; }
+    }
+
+    [RelayCommand]
+    private void ScheduleMemoryTest()
+    {
+        var ok = _memTest.ScheduleAtNextBoot();
+        StatusMessage = ok
+            ? "Windows Memory Diagnostic launched — choose a schedule option."
+            : "Failed to launch mdsched.exe.";
+    }
+
+    [RelayCommand]
+    private async Task RunChkdskAsync(string? driveLetter)
+    {
+        if (string.IsNullOrWhiteSpace(driveLetter))
+        {
+            StatusMessage = "No drive specified.";
+            return;
+        }
+
+        // SEC-003: validate drive letter format to prevent argument injection
+        if (!DriveLetterPattern().IsMatch(driveLetter))
+        {
+            StatusMessage = "Invalid drive letter format.";
+            return;
+        }
+
+        var target = ChkdskDrives.FirstOrDefault(d => string.Equals(d.Letter, driveLetter, StringComparison.OrdinalIgnoreCase));
+        IsChkdskRunning = true;
+        _cts?.Dispose();
+        _cts = new CancellationTokenSource();
+        try
+        {
+            await RunChkdskCoreAsync(driveLetter, target, _cts.Token);
+        }
+        finally { IsChkdskRunning = false; }
+    }
+
+    [RelayCommand]
+    private async Task RunChkdskOnSelectedAsync()
+    {
+        var selected = ChkdskDrives.Where(d => d.IsSelected).ToList();
+        if (selected.Count == 0)
+        {
+            StatusMessage = "Select at least one drive.";
+            return;
+        }
+
+        if (!AdminHelper.IsElevated())
+        {
+            StatusMessage = "chkdsk requires admin privileges. Click 'Grant admin privileges' to elevate.";
+            foreach (var d in selected) d.Status = "Needs admin";
+            return;
+        }
+
+        IsChkdskRunning = true;
+        ChkdskStatus = $"Scanning {selected.Count} drive(s)...";
+        _cts?.Dispose();
+        _cts = new CancellationTokenSource();
+        try
+        {
+            for (var i = 0; i < selected.Count; i++)
+            {
+                if (_cts.Token.IsCancellationRequested) break;
+                var d = selected[i];
+                ChkdskStatus = $"[{i + 1}/{selected.Count}] Scanning {d.Letter} — {d.Label}";
+                await RunChkdskCoreAsync(d.Letter, d, _cts.Token);
+            }
+            ChkdskStatus = _cts.Token.IsCancellationRequested ? "Cancelled." : "All scans finished.";
+        }
+        finally { IsChkdskRunning = false; }
+    }
+
+    private async Task RunChkdskCoreAsync(string driveLetter, DriveTarget? target, CancellationToken ct)
+    {
+        // chkdsk /scan requires admin privileges — fail fast with a clear
+        // message instead of running and reporting a cryptic exit code.
+        if (!AdminHelper.IsElevated())
+        {
+            var msg = $"chkdsk {driveLetter} requires admin privileges. Click 'Grant admin privileges' to elevate.";
+            StatusMessage = msg;
+            if (target is not null) target.Status = "Needs admin";
+            return;
+        }
+
+        StatusMessage = $"Running chkdsk {driveLetter} (read-only)...";
+        if (target is not null) target.Status = "Running...";
+        try
+        {
+            // Capture chkdsk output lines so we can parse the verdict from
+            // the text rather than relying solely on the exit code. chkdsk
+            // may return non-zero even on healthy disks (e.g. when the
+            // volume is in use or /scan is not supported on the filesystem).
+            // LineReceived fires from both the stdout and stderr reader threads
+            // concurrently, so the sink must be thread-safe — a plain List<T>.Add can
+            // corrupt the backing array or drop a line under the race.
+            var captured = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            void OnLine(PowerShellLine l) => captured.Enqueue(l.Text);
+            _runner.LineReceived += OnLine;
+
+            int exit;
+            try
+            {
+                exit = await _runner.RunProcessAsync("chkdsk.exe", $"{driveLetter} /scan", ct, PowerShellRunner.OemEncoding);
+            }
+            finally { _runner.LineReceived -= OnLine; }
+
+            var verdict = ParseChkdskVerdict(captured.ToArray(), exit);
+            if (target is not null) target.Status = verdict;
+            StatusMessage = $"chkdsk {driveLetter} done — {verdict}.";
+            Log.Information("chkdsk completed on {Drive}: exit {ExitCode}, verdict {Verdict}", driveLetter, exit, verdict);
+        }
+        catch (OperationCanceledException)
+        {
+            if (target is not null) target.Status = "Cancelled";
+            StatusMessage = $"chkdsk {driveLetter} cancelled.";
+        }
+        catch (InvalidOperationException ex)
+        {
+            if (target is not null) target.Status = "Error";
+            StatusMessage = $"Error on {driveLetter}: {ex.Message}";
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            if (target is not null) target.Status = "Error";
+            StatusMessage = $"Error on {driveLetter}: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Parses chkdsk output to determine the health verdict. The exit code
+    /// alone is unreliable — chkdsk may return non-zero on healthy volumes
+    /// when the volume is in use or /scan is not supported.
+    /// </summary>
+    internal static string ParseChkdskVerdict(IReadOnlyList<string> outputLines, int exitCode)
+    {
+        var combined = string.Join('\n', outputLines);
+
+        // Healthy patterns (English + common localized variants)
+        if (combined.Contains("found no problems", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("no further action is required", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("no errors", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("appears to be healthy", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("no problems were found", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Healthy";
+        }
+
+        // Errors found but corrected
+        if (combined.Contains("made corrections", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("corrected errors", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Repaired";
+        }
+
+        // /scan not supported (FAT32, exFAT)
+        if (combined.Contains("not supported", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("cannot run", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Not supported";
+        }
+
+        // Fall back to exit code
+        return exitCode == 0 ? "Healthy" : $"Exit {exitCode}";
+    }
+
+    [RelayCommand]
+    private void RelaunchAsAdmin()
+    {
+        if (AdminHelper.RelaunchAsAdmin())
+            System.Windows.Application.Current?.Shutdown();
+    }
+
+    [GeneratedRegex(@"^[A-Z]:$", RegexOptions.IgnoreCase)]
+    private static partial Regex DriveLetterPattern();
+
+    [RelayCommand]
+    private void CancelScan() => _cts?.Cancel();
+}
+
+/// <summary>
+/// A fixed drive shown in the chkdsk selector. Mutable so the UI can reflect
+/// live status ("Running...", "OK", "Error") as scans progress.
+/// </summary>
+public sealed partial class DriveTarget : ObservableObject
+{
+    [ObservableProperty] private bool _isSelected;
+    [ObservableProperty] private string _status = "Idle";
+    public string Letter { get; init; } = "C:";
+    public string Label { get; init; } = "";
+    public string FileSystem { get; init; } = "NTFS";
+    public double SizeGB { get; init; }
+    public double FreeGB { get; init; }
+    public string MediaType { get; init; } = "";
+    public string BusType { get; init; } = "";
+
+    public string Display => string.IsNullOrWhiteSpace(Label) || Label == Letter
+        ? $"{Letter}  ·  {SizeGB:F0} GB {FileSystem}"
+        : $"{Letter}  {Label}  ·  {SizeGB:F0} GB {FileSystem}";
+}

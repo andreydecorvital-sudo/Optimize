@@ -1,0 +1,154 @@
+// Optimize · safe pt-BR fallback for runtime status/error prefixes
+// Original project: laurentiu021/SystemManager · MIT License
+
+namespace SysManager.Services;
+
+/// <summary>
+/// Handles dynamic messages whose error/detail suffix is supplied at runtime.
+/// Exact one-word labels are kept separate so translations such as "All" never corrupt words
+/// like "Install". Prefix/sentence replacements remain intentionally narrow.
+/// </summary>
+public static class PtBrRuntimeFallbackCatalog
+{
+    private static readonly Dictionary<string, string> Exact = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Status"] = "Estado",
+        ["Quick"] = "Rápido",
+        ["All"] = "Todos",
+        ["DOWNLOAD"] = "RECEBIMENTO",
+        ["UPLOAD"] = "ENVIO",
+        ["Shred All"] = "Excluir tudo com segurança",
+        ["Deselect All"] = "Desmarcar tudo",
+        ["Select All"] = "Selecionar tudo",
+        ["No results yet"] = "Nenhum resultado ainda",
+        ["No output yet"] = "Nenhuma saída ainda",
+    };
+
+    private static readonly (string English, string Portuguese)[] Replacements =
+    [
+        // Repair an inherited broad "Drive " replacement that could corrupt the OneDrive brand.
+        ("OneUnidade", "OneDrive"),
+
+        // Strings discovered by the rendered-interface audit.
+        ("testa download/upload pela CDN da Cloudflare — representa melhor a navegação real, mas pode mostrar valores menores por causa do overhead HTTP e do roteamento da CDN.",
+            "testa o recebimento e o envio de dados pela CDN da Cloudflare — representa melhor a navegação real, mas pode mostrar valores menores por causa da sobrecarga HTTP e do roteamento da CDN."),
+        ("Pick a folder and analyze to see what's using space.", "Escolha uma pasta e analise para descobrir o que está ocupando espaço."),
+        ("Pick a folder and scan to find files with identical content.", "Escolha uma pasta e analise para encontrar arquivos com conteúdo idêntico."),
+        ("No host entries to show. Add one above to get started.", "Nenhuma entrada de host para mostrar. Adicione uma acima para começar."),
+        ("Output from running operations will stream here.", "A saída das operações em execução aparecerá aqui."),
+        ("Run a check to scan for winget upgrades.", "Execute uma verificação para procurar atualizações pelo WinGet."),
+        ("Click Scan to list installed applications.", "Clique em Analisar para listar os aplicativos instalados."),
+        ("Add files above to securely erase them beyond recovery.", "Adicione arquivos acima para excluí-los com segurança e sem possibilidade de recuperação."),
+        ("Edge is active (background mode / startup boost may be on).", "O Edge está ativo (o modo em segundo plano ou a inicialização acelerada pode estar ativada)."),
+        (" is not installed.", " não está instalado."),
+        ("No activity recorded yet", "Nenhuma atividade registrada ainda"),
+        ("No pending reboots", "Nenhuma reinicialização pendente"),
+        ("No critical events (last 7 days)", "Nenhum evento crítico nos últimos 7 dias"),
+        (" app updates available", " atualizações de aplicativos disponíveis"),
+        ("All SMART indicators healthy", "Todos os indicadores SMART estão saudáveis"),
+        ("No exclusion folders", "Nenhuma pasta de exclusão"),
+        ("Add a folder above to exclude it from Defender scans.", "Adicione uma pasta acima para excluí-la das verificações do Defender."),
+        ("No notification senders found", "Nenhum aplicativo com notificações foi encontrado"),
+        ("Apps appear here after they show their first notification — or nothing matches your search.", "Os aplicativos aparecem aqui depois da primeira notificação — ou nenhum resultado corresponde à pesquisa."),
+        ("Apply pending notification changes", "Aplicar alterações pendentes de notificações"),
+        ("Allow notifications from:", "Permitir notificações de:"),
+        ("Defender status loaded.", "Estado do Defender carregado."),
+        (" · driver ", " · versão do driver "),
+        ("Disabled", "Desativado"),
+
+        ("Export failed (access denied):", "Falha ao exportar (acesso negado):"),
+        ("Import failed (access denied):", "Falha ao importar (acesso negado):"),
+        ("Failed to save report (access denied):", "Falha ao salvar o relatório (acesso negado):"),
+        ("Network error — could not reach GitHub:", "Erro de rede — não foi possível acessar o GitHub:"),
+        ("Could not read Defender status:", "Não foi possível ler o estado do Defender:"),
+        ("Could not change Controlled Folder Access:", "Não foi possível alterar o Acesso Controlado a Pastas:"),
+        ("Could not add the exclusion:", "Não foi possível adicionar a exclusão:"),
+        ("Could not remove the exclusion:", "Não foi possível remover a exclusão:"),
+        ("Could not create a restore point:", "Não foi possível criar um ponto de restauração:"),
+        ("Could not start the restore:", "Não foi possível iniciar a restauração:"),
+        ("Could not read status:", "Não foi possível ler o estado:"),
+        ("Could not start service", "Não foi possível iniciar o serviço"),
+        ("Could not stop service", "Não foi possível parar o serviço"),
+        ("Couldn't copy to clipboard:", "Não foi possível copiar para a área de transferência:"),
+        ("Couldn't copy:", "Não foi possível copiar:"),
+        ("Couldn't open", "Não foi possível abrir"),
+        ("Couldn't change", "Não foi possível alterar"),
+        ("Cannot access update file:", "Não foi possível acessar o arquivo de atualização:"),
+        ("Cannot lock update file:", "Não foi possível bloquear o arquivo de atualização:"),
+        ("Cannot start —", "Não é possível iniciar —"),
+        ("Cannot restore now —", "Não é possível restaurar agora —"),
+        ("Cannot apply now —", "Não é possível aplicar agora —"),
+        ("Display change failed:", "Falha ao alterar a configuração de vídeo:"),
+        ("Health check failed:", "Falha na verificação de saúde:"),
+        ("Cleanup failed:", "Falha na limpeza:"),
+        ("Read settings failed:", "Falha ao ler as configurações:"),
+        ("Power plan change failed:", "Falha ao alterar o plano de energia:"),
+        ("Visual effects change failed:", "Falha ao alterar os efeitos visuais:"),
+        ("Game Mode change failed:", "Falha ao alterar o Modo de Jogo:"),
+        ("Xbox Game Bar change failed:", "Falha ao alterar a Xbox Game Bar:"),
+        ("GPU setting change failed:", "Falha ao alterar a configuração da GPU:"),
+        ("Processor state change failed:", "Falha ao alterar o estado do processador:"),
+        ("Restore point creation failed:", "Falha ao criar o ponto de restauração:"),
+        ("RAM trim failed:", "Falha ao liberar memória de trabalho:"),
+        ("Hibernation toggle failed:", "Falha ao alterar a hibernação:"),
+        ("Restore all settings failed:", "Falha ao restaurar todas as configurações:"),
+        ("Drive enumeration failed:", "Falha ao listar unidades:"),
+        ("CheckDiskHealth failed:", "Falha ao verificar a saúde dos discos:"),
+        ("CheckMemoryErrors failed:", "Falha ao verificar erros de memória:"),
+        ("Service scan failed:", "Falha ao analisar serviços:"),
+        ("Start service failed:", "Falha ao iniciar o serviço:"),
+        ("Stop service failed:", "Falha ao parar o serviço:"),
+        ("Disable service failed:", "Falha ao desativar o serviço:"),
+        ("Enable service failed:", "Falha ao ativar o serviço:"),
+        ("Scan failed:", "Falha na análise:"),
+        ("Analysis failed:", "Falha na análise:"),
+        ("Clean failed:", "Falha na limpeza:"),
+        ("Check failed:", "Falha na verificação:"),
+        ("Export failed:", "Falha ao exportar:"),
+        ("Import failed:", "Falha ao importar:"),
+        ("Download failed:", "Falha no download:"),
+        ("Update failed:", "Falha na atualização:"),
+        ("Failed to save report:", "Falha ao salvar o relatório:"),
+        ("Failed to generate report:", "Falha ao gerar o relatório:"),
+        ("Failed to read registry:", "Falha ao ler o Registro:"),
+        ("Failed to set DNS:", "Falha ao configurar o DNS:"),
+        ("Failed to reset DNS:", "Falha ao redefinir o DNS:"),
+        ("Failed to restore DNS:", "Falha ao restaurar o DNS:"),
+        ("Error reading hosts file:", "Erro ao ler o arquivo hosts:"),
+        ("Error saving hosts file:", "Erro ao salvar o arquivo hosts:"),
+        ("Error restoring hosts file:", "Erro ao restaurar o arquivo hosts:"),
+        ("Event log error:", "Erro no Log de Eventos:"),
+        ("Windows Update Agent error:", "Erro do Agente do Windows Update:"),
+        ("WUA error:", "Erro WUA:"),
+        ("WMI error:", "Erro WMI:"),
+        ("Memory API unavailable:", "API de memória indisponível:"),
+        ("Network:", "Rede:"),
+        ("Recommended action:", "Ação recomendada:"),
+        ("Active plan:", "Plano ativo:"),
+        ("Last scan:", "Última análise:"),
+        ("Scan at", "Análise às"),
+        ("Querying winget list…", "Consultando lista do WinGet…"),
+        ("Purging standby list…", "Liberando memória em espera…"),
+        ("Error on", "Erro em"),
+        ("Error:", "Erro:"),
+        ("Failed:", "Falha:"),
+    ];
+
+    public static string Translate(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return text ?? string.Empty;
+
+        var trimmed = text.Trim();
+        if (Exact.TryGetValue(trimmed, out var exact))
+        {
+            var leading = text.Length - text.TrimStart().Length;
+            var trailing = text.Length - text.TrimEnd().Length;
+            return new string(' ', leading) + exact + new string(' ', trailing);
+        }
+
+        var result = text;
+        foreach (var (english, portuguese) in Replacements)
+            result = result.Replace(english, portuguese, StringComparison.OrdinalIgnoreCase);
+        return result;
+    }
+}

@@ -1,0 +1,171 @@
+# Security Policy
+
+SysManager is a local Windows desktop tool. It runs on your machine, uses
+elevated privileges for some features, and executes PowerShell scripts and
+native system utilities on your behalf. Because of this, the security of the
+app and its releases matters — thank you for helping keep it safe.
+
+## Supported versions
+
+Security fixes are applied to the latest minor release only. If you're on an
+older build, the first step is usually to update.
+
+| Version  | Supported          |
+| -------- | ------------------ |
+| 1.56.x   | :white_check_mark: |
+| < 1.56   | :x:                |
+
+## Reporting a vulnerability
+
+**Please do not open a public GitHub issue for security problems.** Public
+issues are visible to everyone and may put users at risk before a fix is
+available.
+
+Instead, use one of these private channels:
+
+1. **GitHub private vulnerability reporting** (preferred) —
+   go to the [Security tab](https://github.com/laurentiu021/SystemManager/security)
+   of this repo and click **"Report a vulnerability"**. Only the maintainer
+   sees the report.
+2. **Email** the maintainer at the address on the
+   [GitHub profile](https://github.com/laurentiu021). Use a subject line
+   starting with `[SysManager security]`.
+
+Please include:
+
+- A short description of the issue and its impact.
+- Steps to reproduce (proof-of-concept, screenshots, or a minimal script
+  if applicable).
+- SysManager version (visible in the **About** tab).
+- Windows version and whether the app was running elevated.
+- Any suggested mitigation, if you have one.
+
+## What happens next
+
+- **Acknowledgement** within 72 hours.
+- **Initial assessment** within 7 days (is it reproducible, how severe,
+  which versions are affected).
+- **Fix timeline** depends on severity:
+  - Critical (RCE, privilege escalation, arbitrary file deletion triggered
+    remotely): patch released as soon as possible, usually within 7 days.
+  - High (local privilege issues, data disclosure): 14 days.
+  - Medium / low: next scheduled minor release.
+- **Public disclosure** happens only after a fix is available. The reporter
+  is credited in the release notes unless they prefer to stay anonymous.
+
+## Security model
+
+What the app can and cannot do by design:
+
+### By design — allowed
+
+- Read system information (WMI, CIM, registry).
+- Run read-only disk checks (`chkdsk` without `/f`).
+- Run PowerShell scripts bundled with the app (Windows Update, SMART
+  queries, etc.).
+- Launch external CLIs: `winget`, Ookla `speedtest`, `tracert`, `ping`.
+- Delete files in user-selected cleanup categories (Deep Cleanup tab).
+- Empty the Recycle Bin.
+- Clear per-browser cache, history, cookies, and sessions (Browser Cleaner tab)
+  — only for categories the user explicitly selects. Cookies and sessions are
+  marked sensitive and unticked by default so a clean never silently signs the
+  user out; locked files (browser open) are skipped, and reparse points are
+  never followed out of the browser's own folders.
+- Download application updates from the official GitHub Releases API.
+
+### By design — forbidden
+
+- Reading or exfiltrating saved passwords or any browser password store.
+- The Deep Cleanup engine touching browser data — that engine never reads or
+  deletes browser caches/cookies; only the dedicated Browser Cleaner tab does,
+  and only with the explicit per-category consent described above.
+- Touching the Windows registry for cleanup.
+- Deleting game files, installed binaries, or any active driver folder. The
+  cleanup engine never touches `steamapps\common` or installed game/program
+  executables; it does remove specific launcher cache and log subfolders that
+  happen to live under `Program Files` (e.g. Steam `appcache` / `htmlcache` /
+  `depotcache` / `shadercache`, Riot/League logs) — but never the games themselves.
+- Deleting from the Large Files scan (in the Deep Cleanup tab) — it is
+  intentionally read-only, even with admin rights.
+- Sending telemetry or contacting any server other than the ones needed
+  for an explicit user action (ping targets, speed-test hosts, GitHub
+  Releases).
+- Elevating silently — every admin action surfaces a banner first and
+  uses the standard `runas` UAC prompt.
+
+### Things to be aware of
+
+- **PowerShell execution**: Windows Update and SMART features invoke
+  PowerShell. Scripts are bundled with the app, not downloaded at runtime.
+  Administrator sessions isolate PowerShell runspaces in Windows PowerShell 5.1
+  child processes whose
+  module discovery is restricted to canonical machine-owned locations under
+  Program Files and System32, without changing the parent process environment.
+  Per-user modules and optional module installation remain available only when
+  the app runs without elevation.
+- **External CLI downloads**: the Ookla speed-test CLI is downloaded from
+  `install.speedtest.net` the first time it's used. If that URL changes,
+  the feature fails safely rather than substituting an alternative.
+- **Auto-update**: new builds are downloaded from the official GitHub
+  Releases endpoint. The app does not auto-install without an explicit
+  click. Before applying, the downloaded binary's SHA256 and Authenticode
+  signature are checked; the swap is then performed from within the
+  downloaded executable itself (no intermediate script on disk) using a
+  staged atomic file move, so an interrupted update cannot leave a
+  half-written, unstartable binary. You can also download manually and
+  verify the binary yourself.
+- **Portable distribution model**: the standard distribution is a portable,
+  self-contained `.exe` (also published to winget as a portable package),
+  which lives in a per-user, user-writable location. This means a process
+  already running under your account could replace the executable on disk —
+  a property inherent to any user-writable portable app, independent of the
+  update flow. If you run SysManager elevated, only run a build you obtained
+  from the official Releases page and verified. A machine-scope installed
+  build under `Program Files` (not user-writable) is planned alongside code
+  signing once a certificate is available.
+
+## Verifying a release
+
+Every release on GitHub ships a versioned `SysManager-v<version>.exe` and a
+matching `SysManager-v<version>.exe.sha256` file. You can verify the binary
+before running it (replace `<version>` with the version you downloaded):
+
+```powershell
+Get-FileHash .\SysManager-v<version>.exe -Algorithm SHA256
+# Compare the output to the contents of the .sha256 file from the release page.
+```
+
+The build is **not** currently code-signed. Windows SmartScreen may show a
+warning on first launch; this is expected until a code-signing certificate
+is available. Verifying the SHA256 hash is the recommended mitigation in
+the meantime.
+
+## Dependencies and supply chain
+
+- Dependencies are tracked via NuGet and kept current by
+  [Dependabot](.github/dependabot.yml).
+- CI builds and runs the unit test suite on every pull request.
+  Integration tests (which access real OS APIs) run locally only.
+- The release workflow builds the binary from source on a clean GitHub
+  Actions runner and publishes both the `.exe` and its SHA256 sum together.
+
+## Scope
+
+In scope:
+
+- Arbitrary code execution or privilege escalation through the app.
+- Path traversal or symlink attacks that let the cleanup engine delete
+  files outside advertised categories.
+- Credential or token exposure (shouldn't apply — the app stores neither).
+- Update channel attacks (spoofed releases, signature bypass).
+
+Out of scope:
+
+- Social engineering that requires the user to deliberately override a
+  safety prompt.
+- Vulnerabilities in third-party binaries the user chooses to install
+  (winget packages, PSWindowsUpdate, Ookla CLI).
+- Denial of service caused by scanning huge folder trees (the UI stays
+  responsive; scans are cancellable).
+
+Thanks for reading, and thanks in advance for any responsible disclosure.

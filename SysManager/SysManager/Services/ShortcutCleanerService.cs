@@ -1,0 +1,273 @@
+// SysManager · ShortcutCleanerService — scans for broken .lnk shortcuts
+// Author: laurentiu021 · https://github.com/laurentiu021/SystemManager
+// License: MIT
+
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using Serilog;
+using SysManager.Models;
+
+namespace SysManager.Services;
+
+/// <summary>
+/// Scans common locations for .lnk shortcuts whose targets no longer exist.
+/// Supports deletion to Recycle Bin or permanent delete.
+/// </summary>
+public sealed partial class ShortcutCleanerService
+{
+    /// <summary>
+    /// Scans all common shortcut locations and returns broken shortcuts.
+    /// </summary>
+    public Task<IReadOnlyList<BrokenShortcut>> ScanAsync(
+        IProgress<string>? progress = null,
+        CancellationToken ct = default)
+        => Task.Run(() => Scan(progress, ct), ct);
+
+    private static IReadOnlyList<BrokenShortcut> Scan(
+        IProgress<string>? progress, CancellationToken ct)
+    {
+        List<BrokenShortcut> results = [];
+        var locations = GetScanLocations();
+
+        foreach (var (label, path) in locations)
+        {
+            if (ct.IsCancellationRequested) break;
+            if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) continue;
+
+            progress?.Report($"Scanning {label}...");
+
+            foreach (var lnk in EnumerateLnkFilesSafe(path, ct))
+            {
+                if (ct.IsCancellationRequested) break;
+
+                try
+                {
+                    var target = ResolveShortcutTarget(lnk);
+                    if (string.IsNullOrWhiteSpace(target)) continue;
+
+                    // Skip URLs, shell objects, and special targets
+                    if (target.StartsWith("::") || target.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    // Check if target exists (file or directory)
+                    if (!File.Exists(target) && !Directory.Exists(target))
+                    {
+                        results.Add(new BrokenShortcut
+                        {
+                            Name = Path.GetFileNameWithoutExtension(lnk),
+                            ShortcutPath = lnk,
+                            TargetPath = target,
+                            Location = label
+                        });
+                    }
+                }
+                catch (IOException) { /* skip inaccessible shortcut */ }
+                catch (UnauthorizedAccessException) { /* skip protected shortcut */ }
+                catch (COMException) { /* skip corrupted shortcut */ }
+            }
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Recursively enumerates <c>*.lnk</c> files under <paramref name="root"/>, tolerating
+    /// per-directory access errors. <see cref="Directory.EnumerateFiles(string, string, SearchOption)"/>
+    /// with <see cref="SearchOption.AllDirectories"/> throws mid-iteration the first time it hits
+    /// a folder it can't read (e.g. a protected Start-Menu subfolder), which previously aborted
+    /// the entire scan for that location and silently dropped every shortcut after it. This walks
+    /// the tree directory-by-directory so one unreadable folder is skipped, not the whole scan.
+    /// Reparse points (junctions/symlinks) are skipped to avoid following links out of the tree.
+    /// </summary>
+    internal static IEnumerable<string> EnumerateLnkFilesSafe(string root, CancellationToken ct)
+    {
+        Stack<string> stack = [];
+        stack.Push(root);
+
+        while (stack.Count > 0)
+        {
+            if (ct.IsCancellationRequested) yield break;
+            var dir = stack.Pop();
+
+            string[] files;
+            try { files = Directory.GetFiles(dir, "*.lnk"); }
+            catch (IOException) { continue; }
+            catch (UnauthorizedAccessException) { continue; }
+
+            foreach (var f in files)
+                yield return f;
+
+            string[] subDirs;
+            try { subDirs = Directory.GetDirectories(dir); }
+            catch (IOException) { continue; }
+            catch (UnauthorizedAccessException) { continue; }
+
+            foreach (var sub in subDirs)
+            {
+                // Skip reparse points so a junction can't redirect the walk outside the tree.
+                try
+                {
+                    if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0) continue;
+                }
+                catch (IOException) { continue; }
+                catch (UnauthorizedAccessException) { continue; }
+
+                stack.Push(sub);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Deletes selected shortcuts. Returns count of successfully deleted items.
+    /// </summary>
+    public static int DeleteShortcuts(IEnumerable<BrokenShortcut> shortcuts, bool toRecycleBin)
+    {
+        int deleted = 0;
+        foreach (var s in shortcuts.Where(x => x.IsSelected))
+        {
+            try
+            {
+                if (!File.Exists(s.ShortcutPath)) continue;
+
+                if (toRecycleBin)
+                {
+                    // Only count it if the shell actually recycled the file.
+                    if (MoveToRecycleBin(s.ShortcutPath))
+                        deleted++;
+                    else
+                        Log.Warning("Recycle failed (shell reported error): {Path}", s.ShortcutPath);
+                }
+                else
+                {
+                    File.Delete(s.ShortcutPath);
+                    deleted++;
+                }
+            }
+            catch (IOException ex) { Log.Warning(ex, "Failed to delete shortcut: {Path}", s.ShortcutPath); }
+            catch (UnauthorizedAccessException ex) { Log.Warning(ex, "Access denied deleting shortcut: {Path}", s.ShortcutPath); }
+        }
+        return deleted;
+    }
+
+    private static List<(string Label, string Path)> GetScanLocations()
+    {
+        List<(string, string)> locations = [];
+
+        var userDesktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+        var publicDesktop = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+        if (!string.IsNullOrEmpty(userDesktop)) locations.Add(("Desktop", userDesktop));
+        if (!string.IsNullOrEmpty(publicDesktop) && publicDesktop != userDesktop)
+            locations.Add(("Public Desktop", publicDesktop));
+
+        var userStartMenu = Environment.GetFolderPath(Environment.SpecialFolder.StartMenu);
+        var commonStartMenu = Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu);
+        if (!string.IsNullOrEmpty(userStartMenu)) locations.Add(("Start Menu", userStartMenu));
+        if (!string.IsNullOrEmpty(commonStartMenu) && commonStartMenu != userStartMenu)
+            locations.Add(("Common Start Menu", commonStartMenu));
+
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        if (!string.IsNullOrEmpty(appData))
+        {
+            var quickLaunch = Path.Combine(appData, @"Microsoft\Internet Explorer\Quick Launch");
+            if (Directory.Exists(quickLaunch))
+                locations.Add(("Quick Launch", quickLaunch));
+        }
+
+        var recent = Environment.GetFolderPath(Environment.SpecialFolder.Recent);
+        if (!string.IsNullOrEmpty(recent)) locations.Add(("Recent Items", recent));
+
+        return locations;
+    }
+
+    private static string ResolveShortcutTarget(string lnkPath)
+    {
+        var link = (IShellLink)new ShellLink();
+        var file = (IPersistFile)link;
+        try
+        {
+            file.Load(lnkPath, 0);
+
+            // Use an extended-length buffer rather than the legacy MAX_PATH (260). A target
+            // longer than 260 chars would otherwise be truncated, fail the existence check,
+            // and the shortcut would be wrongly reported as broken (a destructive false
+            // positive — the user could delete a perfectly valid shortcut).
+            var sb = new char[short.MaxValue];
+            link.GetPath(sb, sb.Length, IntPtr.Zero, 0);
+            var target = new string(sb).TrimEnd('\0');
+
+            if (target.Contains('%'))
+                target = Environment.ExpandEnvironmentVariables(target);
+
+            return target;
+        }
+        finally
+        {
+            // LEAK-002: Only release the original COM object once. IPersistFile
+            // is the same underlying COM object (QueryInterface), so releasing
+            // both would double-decrement the ref count.
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(link);
+        }
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern int SHFileOperation(ref SHFILEOPSTRUCT lpFileOp);
+
+    private static bool MoveToRecycleBin(string path)
+    {
+        var op = new SHFILEOPSTRUCT
+        {
+            wFunc = 0x0003,
+            pFrom = path + '\0' + '\0',
+            fFlags = 0x0040 | 0x0010
+        };
+        // SHFileOperation returns non-zero (and/or sets fAnyOperationsAborted) on
+        // failure WITHOUT throwing. Returning that result lets the caller avoid
+        // counting a silently-failed recycle as a successful deletion.
+        var rc = SHFileOperation(ref op);
+        return rc == 0 && !op.fAnyOperationsAborted;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct SHFILEOPSTRUCT
+    {
+        public IntPtr hwnd;
+        public uint wFunc;
+        [MarshalAs(UnmanagedType.LPWStr)] public string pFrom;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? pTo;
+        public ushort fFlags;
+        [MarshalAs(UnmanagedType.Bool)] public bool fAnyOperationsAborted;
+        public IntPtr hNameMappings;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? lpszProgressTitle;
+    }
+
+    [ComImport]
+    [Guid("00021401-0000-0000-C000-000000000046")]
+    private class ShellLink { }
+
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("000214F9-0000-0000-C000-000000000046")]
+    private interface IShellLink
+    {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] char[] pszFile,
+            int cch, IntPtr pfd, uint fFlags);
+        void GetIDList(out IntPtr ppidl);
+        void SetIDList(IntPtr pidl);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] char[] pszName, int cch);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] char[] pszDir, int cch);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] char[] pszArgs, int cch);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
+        void GetHotkey(out short pwHotkey);
+        void SetHotkey(short wHotkey);
+        void GetShowCmd(out int piShowCmd);
+        void SetShowCmd(int iShowCmd);
+        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] char[] pszIconPath, int cch, out int piIcon);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, uint dwReserved);
+        void Resolve(IntPtr hwnd, uint fFlags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
+    }
+}

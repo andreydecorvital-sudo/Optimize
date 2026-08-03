@@ -1,0 +1,157 @@
+// SysManager · AppAlertsViewModel — monitors and alerts on new app installations
+// Author: laurentiu021 · https://github.com/laurentiu021/SystemManager
+// License: MIT
+
+using System.Windows;
+using System.Windows.Threading;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Serilog;
+using SysManager.Helpers;
+using SysManager.Models;
+using SysManager.Services;
+
+namespace SysManager.ViewModels;
+
+/// <summary>
+/// App Alerts tab — monitors for new application installations and shows
+/// a timestamped history of detected installs.
+/// </summary>
+public sealed partial class AppAlertsViewModel : ViewModelBase
+{
+    private readonly AppAlertService _service;
+    private readonly Dispatcher _dispatcher;
+
+    public BulkObservableCollection<AppInstallEntry> Alerts { get; } = new();
+
+    [ObservableProperty] private bool _isMonitoring;
+    [ObservableProperty] private string _monitorStatus = "Click Start to begin monitoring for new installations.";
+    [ObservableProperty] private int _alertCount;
+    [ObservableProperty] private int _unacknowledgedCount;
+
+    public AppAlertsViewModel(AppAlertService service)
+    {
+        _service = service;
+        _dispatcher = Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
+        _service.NewAppDetected += OnNewAppDetected;
+    }
+
+    [RelayCommand]
+    private async Task StartMonitoringAsync()
+    {
+        if (IsMonitoring) return;
+
+        // TakeBaseline() walks Program Files / LocalAppData\Programs AND enumerates both
+        // HKLM Uninstall trees (hundreds of subkeys) — the same heavy scan
+        // RefreshInstalledAppsAsync deliberately offloads. Running it synchronously in the
+        // command froze the UI for the whole scan. Offload it (and Start(), whose
+        // FileSystemWatcher creation is thread-agnostic and whose NewAppDetected event is
+        // marshaled via the SynchronizationContext captured at service construction), then
+        // resume on the UI thread to set the bound state.
+        MonitorStatus = "Starting monitoring…";
+        await Task.Run(() =>
+        {
+            _service.TakeBaseline();
+            _service.Start();
+        }).ConfigureAwait(true);
+
+        IsMonitoring = true;
+        IsBusy = true;
+        MonitorStatus = "Monitoring active — watching for new installations...";
+        Log.Information("App alert monitoring started by user");
+    }
+
+    [RelayCommand]
+    private void StopMonitoring()
+    {
+        if (!IsMonitoring) return;
+
+        _service.Stop();
+        IsMonitoring = false;
+        IsBusy = false;
+        MonitorStatus = $"Monitoring stopped. {AlertCount} alert{(AlertCount == 1 ? "" : "s")} recorded.";
+        Log.Information("App alert monitoring stopped by user");
+    }
+
+    [RelayCommand]
+    private void AcknowledgeAll()
+    {
+        foreach (var a in Alerts)
+            a.IsAcknowledged = true;
+        UnacknowledgedCount = 0;
+    }
+
+    [RelayCommand]
+    private void ClearHistory()
+    {
+        Alerts.Clear();
+        AlertCount = 0;
+        UnacknowledgedCount = 0;
+        MonitorStatus = IsMonitoring
+            ? "Monitoring active — history cleared."
+            : "History cleared.";
+    }
+
+    [RelayCommand]
+    private async Task RefreshInstalledAppsAsync()
+    {
+        StatusMessage = "Loading installed applications...";
+        IsBusy = true;
+        IsProgressIndeterminate = true;
+
+        try
+        {
+            // The HKLM uninstall-tree enumeration is synchronous and walks the whole
+            // registry — run it off the UI thread so the window stays responsive.
+            var apps = await Task.Run(AppAlertService.GetRegistryApps).ConfigureAwait(true);
+            var sorted = apps.OrderBy(a => a.Name).ToList();
+            foreach (var app in sorted)
+            {
+                app.DetectedAt = DateTime.Now;
+                app.IsAcknowledged = true;
+            }
+            Alerts.ReplaceWith(sorted);
+            AlertCount = Alerts.Count;
+            UnacknowledgedCount = 0;
+            MonitorStatus = $"Loaded {AlertCount} currently installed applications.";
+            StatusMessage = "Done.";
+            ToastService.Instance.Show("Installed apps loaded", $"{AlertCount} applications found");
+        }
+        catch (System.Security.SecurityException ex)
+        {
+            MonitorStatus = $"Failed to read registry: {ex.Message}";
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            MonitorStatus = $"Access denied: {ex.Message}";
+        }
+        finally
+        {
+            // Keep the busy indicator in sync with the monitoring state: a manual
+            // refresh must not switch off the "monitoring active" affordance.
+            IsBusy = IsMonitoring;
+            IsProgressIndeterminate = false;
+        }
+    }
+
+    private void OnNewAppDetected(AppInstallEntry entry)
+    {
+        _dispatcher.BeginInvoke(() =>
+        {
+            Alerts.Insert(0, entry);
+            AlertCount = Alerts.Count;
+            UnacknowledgedCount = Alerts.Count(a => !a.IsAcknowledged);
+            MonitorStatus = $"New app detected: {entry.Name}";
+        });
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _service.NewAppDetected -= OnNewAppDetected;
+            _service.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+}

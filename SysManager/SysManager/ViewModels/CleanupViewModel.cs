@@ -1,0 +1,518 @@
+// SysManager · CleanupViewModel
+// Author: laurentiu021 · https://github.com/laurentiu021/SystemManager
+// License: MIT
+
+using System.IO;
+using System.Text.RegularExpressions;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Serilog;
+using SysManager.Helpers;
+using SysManager.Models;
+using SysManager.Services;
+
+namespace SysManager.ViewModels;
+
+public sealed partial class CleanupViewModel : ViewModelBase
+{
+    private readonly IPowerShellRunner _runner;
+
+    private readonly EtaCalculator _sfcEta = new();
+    private readonly EtaCalculator _dismEta = new();
+
+    private CancellationTokenSource? _tempCts;
+    private CancellationTokenSource? _binCts;
+    private CancellationTokenSource? _sfcCts;
+    private CancellationTokenSource? _dismCts;
+
+    // Temp Cleanup, SFC, and DISM all stream through the single shared _runner and its
+    // LineReceived/ProgressChanged events into the one Console, so only one may run at a
+    // time — otherwise their output and progress cross-contaminate. The per-category
+    // OperationLockService locks don't close this gap: Temp Cleanup is a Disk operation
+    // while SFC/DISM are SystemModification, so those locks never exclude Temp from
+    // SFC/DISM. This intra-VM guard does. (Empty-Recycle-Bin doesn't touch _runner, so it
+    // is intentionally not gated.) Set and read only on the UI thread.
+    private bool _runnerBusy;
+
+    public ConsoleViewModel Console { get; } = new();
+
+    [ObservableProperty] private bool _isElevated;
+
+    // Per-task running flags so buttons stay independent and the main thread
+    // doesn't block a user navigating away while SFC grinds for 10 minutes.
+    [ObservableProperty] private bool _isTempRunning;
+    [ObservableProperty] private bool _isBinRunning;
+    [ObservableProperty] private bool _isSfcRunning;
+    [ObservableProperty] private bool _isDismRunning;
+
+    [ObservableProperty] private string _sfcStatus = "Idle";
+    [ObservableProperty] private string _sfcVerdict = "";
+    [ObservableProperty] private string _sfcVerdictColorHex = StatusColors.Neutral;
+    [ObservableProperty] private string _dismStatus = "Idle";
+    [ObservableProperty] private string _dismVerdict = "";
+    [ObservableProperty] private string _dismVerdictColorHex = StatusColors.Neutral;
+
+    [ObservableProperty] private string _sfcEtaText = string.Empty;
+    [ObservableProperty] private string _dismEtaText = string.Empty;
+
+    // Pre-scan info so the tab doesn't look empty on first load
+    [ObservableProperty] private string _tempSizeLabel = "Scanning…";
+    [ObservableProperty] private string _recycleBinLabel = "Scanning…";
+
+    /// <summary>True whenever any background task is running — for a small badge.</summary>
+    public bool IsAnyRunning => IsTempRunning || IsBinRunning || IsSfcRunning || IsDismRunning;
+
+    public CleanupViewModel(IPowerShellRunner runner)
+    {
+        _runner = runner;
+        _runner.LineReceived += OnRunnerLineReceived;
+        _runner.ProgressChanged += OnRunnerProgressChanged;
+        IsElevated = AdminHelper.IsElevated();
+
+        InitializeAsync(InitAsync);
+    }
+
+    private void OnRunnerLineReceived(PowerShellLine l) => Console.Append(l);
+    private void OnRunnerProgressChanged(int p) => Progress = p;
+
+    // Claims the shared _runner for one console/repair op; returns false if another already
+    // holds it. internal for the regression test (mirrors ParseSfcResult's test visibility).
+    internal bool TryBeginConsoleOp()
+    {
+        if (_runnerBusy) return false;
+        _runnerBusy = true;
+        return true;
+    }
+
+    internal void EndConsoleOp() => _runnerBusy = false;
+
+    private async Task InitAsync()
+    {
+        try { await PreScanAsync(); }
+        catch (IOException ex) { Log.Warning("Cleanup pre-scan failed: {Error}", ex.Message); }
+        catch (UnauthorizedAccessException ex) { Log.Warning("Cleanup pre-scan failed: {Error}", ex.Message); }
+        catch (InvalidOperationException ex) { Log.Warning("Cleanup pre-scan failed: {Error}", ex.Message); }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _runner.LineReceived -= OnRunnerLineReceived;
+            _runner.ProgressChanged -= OnRunnerProgressChanged;
+            _tempCts?.Dispose();
+            _binCts?.Dispose();
+            _sfcCts?.Dispose();
+            _dismCts?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    [RelayCommand]
+    private async Task RescanAsync() => await PreScanAsync();
+
+    private async Task PreScanAsync()
+    {
+        try
+        {
+            var (tempLabel, binLabel) = await Task.Run(() =>
+            {
+                // Measure temp folders
+                long tempBytes = 0;
+                var tempPaths = new[] { Environment.GetEnvironmentVariable("TEMP") ?? "", System.IO.Path.Join(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Temp") };
+                foreach (var p in tempPaths.Where(x => !string.IsNullOrEmpty(x) && System.IO.Directory.Exists(x)))
+                {
+                    try
+                    {
+                        foreach (var f in System.IO.Directory.EnumerateFiles(p, "*", System.IO.SearchOption.AllDirectories))
+                        {
+                            try { tempBytes += new System.IO.FileInfo(f).Length; }
+                            catch (IOException) { /* skip inaccessible file */ }
+                            catch (UnauthorizedAccessException) { /* skip protected file */ }
+                        }
+                    }
+                    catch (IOException) { /* skip inaccessible directory */ }
+                    catch (UnauthorizedAccessException) { /* skip protected directory */ }
+                }
+                var tLabel = tempBytes > 0 ? $"{tempBytes / 1024.0 / 1024.0:F1} MB can be freed" : "Empty";
+
+                // Measure recycle bin (rough estimate via shell folder)
+                string bLabel;
+                try
+                {
+                    long binBytes = 0;
+                    // The Recycle Bin lives in a hidden $Recycle.Bin folder on EVERY fixed drive,
+                    // one per-SID subfolder per user. Empty (SHEmptyRecycleBin) only clears the
+                    // CURRENT user's bin, so size only THIS user's per-SID folders — summing the
+                    // whole tree over-reports what emptying can actually free on a multi-user box.
+                    foreach (var recyclePath in RecycleBinHelper.CurrentUserBinPaths())
+                    {
+                        if (!Directory.Exists(recyclePath)) continue;
+                        foreach (var f in Directory.EnumerateFiles(recyclePath, "*", SearchOption.AllDirectories))
+                        {
+                            try { binBytes += new FileInfo(f).Length; }
+                            catch (IOException) { /* skip inaccessible file */ }
+                            catch (UnauthorizedAccessException) { /* skip protected file */ }
+                        }
+                    }
+                    bLabel = binBytes > 0 ? $"{binBytes / 1024.0 / 1024.0:F1} MB in Recycle Bin" : "Empty";
+                }
+                catch (IOException) { bLabel = "Unable to scan"; }
+                catch (UnauthorizedAccessException) { bLabel = "Unable to scan"; }
+
+                return (tLabel, bLabel);
+            });
+
+            // Update on the calling (UI) thread so PropertyChanged fires correctly
+            TempSizeLabel = tempLabel;
+            RecycleBinLabel = binLabel;
+        }
+        catch (IOException ex) { Log.Debug("Pre-scan failed: {Error}", ex.Message); }
+        catch (UnauthorizedAccessException ex) { Log.Debug("Pre-scan access denied: {Error}", ex.Message); }
+    }
+
+    // Each running flag feeds IsAnyRunning; re-evaluate Cancel's CanExecute too so the
+    // button is disabled when nothing is running and enabled the moment a task starts.
+    partial void OnIsTempRunningChanged(bool value) => OnAnyRunningChanged();
+    partial void OnIsBinRunningChanged(bool value) => OnAnyRunningChanged();
+    partial void OnIsSfcRunningChanged(bool value) => OnAnyRunningChanged();
+    partial void OnIsDismRunningChanged(bool value) => OnAnyRunningChanged();
+
+    private void OnAnyRunningChanged()
+    {
+        OnPropertyChanged(nameof(IsAnyRunning));
+        CancelCommand.NotifyCanExecuteChanged();
+    }
+
+    [RelayCommand]
+    private void RelaunchAsAdmin()
+    {
+        if (AdminHelper.RelaunchAsAdmin())
+            System.Windows.Application.Current?.Shutdown();
+    }
+
+    [RelayCommand]
+    private async Task CleanTempAsync()
+    {
+        if (IsTempRunning) return;
+        if (!DialogService.Instance.Confirm(
+                "Delete temporary files from your user and Windows Temp folders?\n\n" +
+                "Files in use may be skipped. This cannot be undone.",
+                "Confirm Temp Cleanup"))
+        {
+            return;
+        }
+        using var opLock = OperationLockService.Instance.TryAcquire(OperationCategory.Disk, "Temp Cleanup");
+        if (opLock is null)
+        {
+            StatusMessage = $"Cannot start — {OperationLockService.Instance.GetActiveOperationName(OperationCategory.Disk)} is already running.";
+            return;
+        }
+        if (!TryBeginConsoleOp())
+        {
+            StatusMessage = "Cannot start — a repair is already using the console. Wait for it to finish.";
+            return;
+        }
+        IsTempRunning = true;
+        StatusMessage = "Cleaning temp folders...";
+        _tempCts?.Dispose();
+        _tempCts = new CancellationTokenSource();
+        try
+        {
+            await _runner.RunScriptViaPwshAsync(@"
+                $paths = @($env:TEMP, ""$env:SystemRoot\Temp"")
+                $script:totalBytes = 0
+                $reparse = [IO.FileAttributes]::ReparsePoint
+                # Windows PowerShell 5.1's Get-ChildItem -Recurse FOLLOWS junctions and
+                # symbolic links, so a reparse point inside %TEMP% pointing elsewhere
+                # could let Remove-Item delete real user data outside the temp tree.
+                # Walk manually with an explicit stack and never descend into a reparse
+                # point; delete a reparse point itself WITHOUT -Recurse (removes the link,
+                # not its target).
+                function Clear-TempDir([string]$root) {
+                    $stack = New-Object System.Collections.Stack
+                    $stack.Push($root)
+                    while ($stack.Count -gt 0) {
+                        $cur = $stack.Pop()
+                        try { $children = Get-ChildItem -LiteralPath $cur -Force -ErrorAction SilentlyContinue } catch { continue }
+                        foreach ($c in $children) {
+                            $isReparse = ($c.Attributes -band $reparse) -eq $reparse
+                            if ($c.PSIsContainer) {
+                                if ($isReparse) {
+                                    try { [IO.Directory]::Delete($c.FullName, $false) } catch {}
+                                } else {
+                                    $stack.Push($c.FullName)
+                                }
+                            } else {
+                                try { $script:totalBytes += $c.Length } catch {}
+                                try { Remove-Item -LiteralPath $c.FullName -Force -ErrorAction SilentlyContinue } catch {}
+                            }
+                        }
+                    }
+                }
+                foreach ($p in $paths) {
+                    if (Test-Path $p) { Clear-TempDir $p }
+                }
+                ""Freed approximately $([Math]::Round($script:totalBytes/1MB,1)) MB""
+            ", cancellationToken: _tempCts.Token);
+            StatusMessage = "Temp cleanup done";
+            Log.Information("Temp cleanup completed");
+            ActivityLogService.Instance.Log("Quick Cleanup", "Cleared temporary files");
+            await PreScanAsync();
+        }
+        catch (OperationCanceledException) { StatusMessage = "Temp cleanup cancelled."; }
+        catch (InvalidOperationException ex) { StatusMessage = $"Error: {ex.Message}"; }
+        finally { EndConsoleOp(); IsTempRunning = false; }
+    }
+
+    [RelayCommand]
+    private async Task EmptyRecycleBinAsync()
+    {
+        if (IsBinRunning) return;
+        if (!DialogService.Instance.Confirm(
+                "Permanently empty the Recycle Bin? Its contents cannot be recovered.",
+                "Confirm Empty Recycle Bin"))
+        {
+            return;
+        }
+        IsBinRunning = true;
+        StatusMessage = "Emptying Recycle Bin...";
+        _binCts?.Dispose();
+        _binCts = new CancellationTokenSource();
+        try
+        {
+            // Use the shared shell-API helper (the single source of truth) rather than an
+            // inline Clear-RecycleBin: the shell API reliably removes ghosted entries that
+            // Clear-RecycleBin can leave behind, and keeps this in step with Deep Cleanup
+            // and the One-Click Tune-Up. Run off the UI thread.
+            var ct = _binCts.Token;
+            await Task.Run(RecycleBinHelper.EmptyAllDrives, ct);
+            StatusMessage = "Done";
+            ToastService.Instance.Show("Cleanup complete", "Operation finished successfully");
+            await PreScanAsync();
+        }
+        catch (OperationCanceledException) { StatusMessage = "Recycle Bin cleanup cancelled."; }
+        catch (InvalidOperationException ex) { StatusMessage = $"Error: {ex.Message}"; }
+        finally { IsBinRunning = false; }
+    }
+
+    [RelayCommand]
+    private async Task RunSfcAsync()
+    {
+        if (IsSfcRunning) return;
+        if (!AdminHelper.IsElevated())
+        {
+            if (!DialogService.Instance.Confirm(
+                "SFC requires admin privileges. Restart the application with elevated privileges?",
+                "Admin Required"))
+            {
+                StatusMessage = "SFC cancelled — admin privileges required.";
+                return;
+            }
+            if (AdminHelper.RelaunchAsAdmin()) System.Windows.Application.Current?.Shutdown();
+            return;
+        }
+
+        // SFC and DISM share the single _runner (and its LineReceived event) with each other
+        // AND with Temp Cleanup, so running two at once cross-contaminates their captured
+        // output and progress. The SystemModification lock makes SFC and DISM mutually
+        // exclusive (and blocks the other system-repair operations); the _runnerBusy guard
+        // below additionally excludes Temp Cleanup, which holds a different (Disk) lock and
+        // so is not covered by this one.
+        using var opLock = OperationLockService.Instance.TryAcquire(OperationCategory.SystemModification, "SFC scan");
+        if (opLock is null)
+        {
+            StatusMessage = $"Cannot start — {OperationLockService.Instance.GetActiveOperationName(OperationCategory.SystemModification)} is already running.";
+            return;
+        }
+        if (!TryBeginConsoleOp())
+        {
+            StatusMessage = "Cannot start — a repair is already using the console. Wait for it to finish.";
+            return;
+        }
+
+        IsSfcRunning = true;
+        IsProgressIndeterminate = true;
+        SfcStatus = "Running — can take 5–15 minutes";
+        SfcVerdict = "";
+        SfcVerdictColorHex = StatusColors.Neutral;
+        SfcEtaText = string.Empty;
+        _sfcEta.Reset();
+        StatusMessage = "SFC running in background. You can keep using the app.";
+        _sfcCts?.Dispose();
+        _sfcCts = new CancellationTokenSource();
+        var captured = new System.Collections.Generic.List<string>();
+        void Collect(PowerShellLine l)
+        {
+            if (l.Kind == OutputKind.Output) captured.Add(l.Text);
+            if (l.Text.Contains('%') || l.Text.Contains("complete", StringComparison.OrdinalIgnoreCase))
+            {
+                var m = SfcPercentRegex().Match(l.Text);
+                if (m.Success && int.TryParse(m.Groups[1].Value, out var pct) && pct is >= 0 and <= 100)
+                {
+                    Progress = pct;
+                    SfcEtaText = _sfcEta.Update(pct);
+                    IsProgressIndeterminate = false;
+                }
+            }
+        }
+        _runner.LineReceived += Collect;
+        try
+        {
+            var exit = await _runner.RunProcessAsync("sfc.exe", "/scannow", _sfcCts.Token, PowerShellRunner.OemEncoding);
+            var (verdict, color) = ParseSfcResult(captured, exit);
+            SfcVerdict = verdict;
+            SfcVerdictColorHex = color;
+            SfcStatus = exit == 0 ? "Completed" : $"Finished (exit {exit})";
+            StatusMessage = verdict;
+        }
+        catch (OperationCanceledException) { SfcStatus = "Cancelled."; SfcVerdict = "Scan was cancelled."; SfcVerdictColorHex = StatusColors.Neutral; StatusMessage = SfcStatus; }
+        catch (InvalidOperationException ex) { SfcStatus = $"Error: {ex.Message}"; SfcVerdict = ex.Message; SfcVerdictColorHex = StatusColors.Bad; StatusMessage = SfcStatus; }
+        catch (System.ComponentModel.Win32Exception ex) { SfcStatus = $"Error: {ex.Message}"; SfcVerdict = ex.Message; SfcVerdictColorHex = StatusColors.Bad; StatusMessage = SfcStatus; }
+        finally { _runner.LineReceived -= Collect; EndConsoleOp(); IsSfcRunning = false; IsProgressIndeterminate = false; SfcEtaText = string.Empty; }
+    }
+
+    /// <summary>
+    /// Parses the captured SFC output lines to produce a human-readable verdict
+    /// with an appropriate color. SFC writes its results in the OEM code page,
+    /// so we match on key phrases that appear in all locales.
+    /// </summary>
+    internal static (string Verdict, string ColorHex) ParseSfcResult(IReadOnlyList<string> lines, int exitCode)
+    {
+        var all = string.Join(" ", lines);
+
+        // "did not find any integrity violations"
+        if (all.Contains("did not find any integrity violations", StringComparison.OrdinalIgnoreCase))
+            return ("No integrity violations found — your system files are healthy.", StatusColors.Good);
+
+        // "found corrupt files and successfully repaired them"
+        if (all.Contains("successfully repaired", StringComparison.OrdinalIgnoreCase))
+            return ("Corrupted files were found and successfully repaired.", StatusColors.Warning);
+
+        // "found corrupt files but was unable to fix some of them"
+        if (all.Contains("unable to fix", StringComparison.OrdinalIgnoreCase))
+            return ("Corrupted files found but SFC could not repair them. Try running DISM /RestoreHealth first, then SFC again.", StatusColors.Bad);
+
+        // "could not perform the requested operation"
+        if (all.Contains("could not perform", StringComparison.OrdinalIgnoreCase))
+            return ("SFC could not run. Try rebooting into Safe Mode or running DISM first.", StatusColors.Bad);
+
+        // Fallback based on exit code
+        return exitCode == 0
+            ? ("Scan completed successfully.", StatusColors.Good)
+            : ($"Scan finished with exit code {exitCode}. Check the console output for details.", StatusColors.Warning);
+    }
+
+    [RelayCommand]
+    private async Task RunDismAsync()
+    {
+        if (IsDismRunning) return;
+        if (!AdminHelper.IsElevated())
+        {
+            if (!DialogService.Instance.Confirm(
+                "DISM requires admin privileges. Restart the application with elevated privileges?",
+                "Admin Required"))
+            {
+                StatusMessage = "DISM cancelled — admin privileges required.";
+                return;
+            }
+            if (AdminHelper.RelaunchAsAdmin()) System.Windows.Application.Current?.Shutdown();
+            return;
+        }
+
+        // Mutually exclusive with SFC and the other system-repair ops (SystemModification
+        // lock) AND with Temp Cleanup (the _runnerBusy guard below): all three share the
+        // single _runner and its LineReceived event, so concurrent runs would cross-
+        // contaminate captured output and progress. Temp holds a different (Disk) lock, so
+        // only the guard — not this lock — excludes it.
+        using var opLock = OperationLockService.Instance.TryAcquire(OperationCategory.SystemModification, "DISM RestoreHealth");
+        if (opLock is null)
+        {
+            StatusMessage = $"Cannot start — {OperationLockService.Instance.GetActiveOperationName(OperationCategory.SystemModification)} is already running.";
+            return;
+        }
+        if (!TryBeginConsoleOp())
+        {
+            StatusMessage = "Cannot start — a repair is already using the console. Wait for it to finish.";
+            return;
+        }
+
+        IsDismRunning = true;
+        IsProgressIndeterminate = true;
+        DismStatus = "Running — can take 10–30 minutes";
+        DismVerdict = "";
+        DismVerdictColorHex = StatusColors.Neutral;
+        DismEtaText = string.Empty;
+        _dismEta.Reset();
+        StatusMessage = "DISM running in background. You can keep using the app.";
+        _dismCts?.Dispose();
+        _dismCts = new CancellationTokenSource();
+        var captured = new System.Collections.Generic.List<string>();
+        void Collect(PowerShellLine l)
+        {
+            if (l.Kind == OutputKind.Output) captured.Add(l.Text);
+            if (l.Text.Contains('%'))
+            {
+                var m = DismPercentRegex().Match(l.Text);
+                if (m.Success && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var pct) && pct is >= 0 and <= 100)
+                {
+                    Progress = (int)pct;
+                    DismEtaText = _dismEta.Update((int)pct);
+                    IsProgressIndeterminate = false;
+                }
+            }
+        }
+        _runner.LineReceived += Collect;
+        try
+        {
+            var exit = await _runner.RunProcessAsync("DISM.exe", "/Online /Cleanup-Image /RestoreHealth", _dismCts.Token, PowerShellRunner.OemEncoding);
+            var (verdict, color) = ParseDismResult(captured, exit);
+            DismVerdict = verdict;
+            DismVerdictColorHex = color;
+            DismStatus = exit == 0 ? "Completed" : $"Finished (exit {exit})";
+            StatusMessage = verdict;
+        }
+        catch (OperationCanceledException) { DismStatus = "Cancelled."; DismVerdict = "Repair was cancelled."; DismVerdictColorHex = StatusColors.Neutral; StatusMessage = DismStatus; }
+        catch (InvalidOperationException ex) { DismStatus = $"Error: {ex.Message}"; DismVerdict = ex.Message; DismVerdictColorHex = StatusColors.Bad; StatusMessage = DismStatus; }
+        catch (System.ComponentModel.Win32Exception ex) { DismStatus = $"Error: {ex.Message}"; DismVerdict = ex.Message; DismVerdictColorHex = StatusColors.Bad; StatusMessage = DismStatus; }
+        finally { _runner.LineReceived -= Collect; EndConsoleOp(); IsDismRunning = false; IsProgressIndeterminate = false; DismEtaText = string.Empty; }
+    }
+
+    /// <summary>
+    /// Parses DISM RestoreHealth output into a verdict with color.
+    /// </summary>
+    internal static (string Verdict, string ColorHex) ParseDismResult(IReadOnlyList<string> lines, int exitCode)
+    {
+        var all = string.Join(" ", lines);
+
+        if (all.Contains("The restore operation completed successfully", StringComparison.OrdinalIgnoreCase))
+            return ("Component store is healthy — no repairs needed.", StatusColors.Good);
+
+        if (all.Contains("The component store corruption was repaired", StringComparison.OrdinalIgnoreCase))
+            return ("Component store was corrupted and has been repaired. Run SFC /scannow next.", StatusColors.Warning);
+
+        if (all.Contains("source files could not be found", StringComparison.OrdinalIgnoreCase))
+            return ("DISM could not find source files for repair. Try connecting to the internet or using a Windows ISO.", StatusColors.Bad);
+
+        return exitCode == 0
+            ? ("Repair completed successfully.", StatusColors.Good)
+            : ($"DISM finished with exit code {exitCode}. Check the console output for details.", StatusColors.Warning);
+    }
+
+    [RelayCommand(CanExecute = nameof(IsAnyRunning))]
+    private void Cancel()
+    {
+        _tempCts?.Cancel();
+        _binCts?.Cancel();
+        _sfcCts?.Cancel();
+        _dismCts?.Cancel();
+    }
+
+    // SFC reports progress as a whole-number percentage, e.g. "50 %".
+    [GeneratedRegex(@"(\d+)\s*%")]
+    private static partial Regex SfcPercentRegex();
+
+    // DISM reports progress as a decimal percentage, e.g. "50.0%".
+    [GeneratedRegex(@"([\d.]+)%")]
+    private static partial Regex DismPercentRegex();
+}

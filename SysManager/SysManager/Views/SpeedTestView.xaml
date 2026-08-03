@@ -1,0 +1,163 @@
+<!-- SysManager · Author: laurentiu021 · https://github.com/laurentiu021/SystemManager · License: MIT -->
+<UserControl x:Class="SysManager.Views.SpeedTestView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Grid Background="{DynamicResource Surface0}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="28,24,28,0">
+            <TextBlock Text="Speed Test" Style="{StaticResource Display}"/>
+            <TextBlock Text="Ookla and HTTP speed tests with history tracking."
+                       Style="{StaticResource Subtle}" Margin="0,4,0,0"/>
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="28,16,28,28">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Ookla card -->
+                <Border Grid.Row="0" Grid.Column="0" Style="{StaticResource Card}">
+                    <StackPanel>
+                        <DockPanel>
+                            <StackPanel>
+                                <TextBlock Text="Ookla speed test" Style="{StaticResource SectionTitle}"/>
+                                <TextBlock Text="Official CLI, downloaded on first run" Style="{StaticResource Subtle}" Margin="0,2,0,0"/>
+                            </StackPanel>
+                            <Button Content="Run" Command="{Binding RunOoklaSpeedCommand}" Style="{StaticResource PrimaryButton}"
+                                    AutomationProperties.Name="Run Ookla speed test"
+                                    HorizontalAlignment="Right" DockPanel.Dock="Right" Padding="18,8"
+                                    IsEnabled="{Binding IsSpeedTesting, Converter={StaticResource BoolInvert}}"/>
+                            <ComboBox ItemsSource="{Binding OoklaServerOptions}"
+                                      SelectedItem="{Binding SelectedOoklaServer}"
+                                      AutomationProperties.Name="Ookla server"
+                                      Width="180" Margin="0,0,8,0" VerticalAlignment="Center"
+                                      DockPanel.Dock="Right"/>
+                        </DockPanel>
+                        <Grid Margin="0,16,0,0" Visibility="{Binding OoklaResult, Converter={StaticResource FlexVis}}">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Grid.Column="0" Style="{StaticResource CardInner}" Margin="0,0,6,0"><StackPanel><TextBlock Text="DOWNLOAD" Style="{StaticResource SectionLabel}"/><TextBlock Text="{Binding OoklaResult.DownloadMbps, StringFormat={}{0:F1} Mbps}" Style="{StaticResource Metric}" Foreground="{DynamicResource Info}"/></StackPanel></Border>
+                            <Border Grid.Column="1" Style="{StaticResource CardInner}" Margin="6,0"><StackPanel><TextBlock Text="UPLOAD" Style="{StaticResource SectionLabel}"/><TextBlock Text="{Binding OoklaResult.UploadMbps, StringFormat={}{0:F1} Mbps}" Style="{StaticResource Metric}" Foreground="{DynamicResource Success}"/></StackPanel></Border>
+                            <Border Grid.Column="2" Style="{StaticResource CardInner}" Margin="6,0,0,0"><StackPanel><TextBlock Text="PING" Style="{StaticResource SectionLabel}"/><TextBlock Text="{Binding OoklaResult.PingMs, StringFormat={}{0:F0} ms}" Style="{StaticResource Metric}" Foreground="{DynamicResource Warning}"/></StackPanel></Border>
+                        </Grid>
+                        <TextBlock Text="{Binding OoklaResult.Server}" Style="{StaticResource Caption}" Margin="0,10,0,0" Visibility="{Binding OoklaResult, Converter={StaticResource FlexVis}}"/>
+                        <ProgressBar AutomationProperties.Name="Progress" Value="{Binding SpeedProgress}" Maximum="100" Height="4" Margin="0,14,0,0" Visibility="{Binding IsOoklaTesting, Converter={StaticResource FlexVis}}"/>
+                        <TextBlock Text="{Binding OoklaStatus}" Style="{StaticResource Subtle}" Margin="0,6,0,0"/>
+                        <Button Content="Cancel" Command="{Binding CancelSpeedCommand}" Style="{StaticResource GhostButton}" AutomationProperties.Name="Cancel Ookla speed test" Margin="0,6,0,0" HorizontalAlignment="Left" Visibility="{Binding IsOoklaTesting, Converter={StaticResource FlexVis}}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- HTTP card -->
+                <Border Grid.Row="0" Grid.Column="1" Style="{StaticResource Card}" Margin="16,0,0,0">
+                    <StackPanel>
+                        <DockPanel>
+                            <StackPanel>
+                                <TextBlock Text="HTTP speed test" Style="{StaticResource SectionTitle}"/>
+                                <TextBlock Text="Measured against speed.cloudflare.com" Style="{StaticResource Subtle}" Margin="0,2,0,0"/>
+                            </StackPanel>
+                            <Button Content="Run" Command="{Binding RunHttpSpeedCommand}" Style="{StaticResource PrimaryButton}"
+                                    AutomationProperties.Name="Run HTTP speed test"
+                                    HorizontalAlignment="Right" DockPanel.Dock="Right" Padding="18,8"
+                                    IsEnabled="{Binding IsSpeedTesting, Converter={StaticResource BoolInvert}}"/>
+                        </DockPanel>
+                        <Grid Margin="0,16,0,0" Visibility="{Binding HttpResult, Converter={StaticResource FlexVis}}">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Grid.Column="0" Style="{StaticResource CardInner}" Margin="0,0,6,0"><StackPanel><TextBlock Text="DOWNLOAD" Style="{StaticResource SectionLabel}"/><TextBlock Text="{Binding HttpResult.DownloadMbps, StringFormat={}{0:F1} Mbps}" Style="{StaticResource Metric}" Foreground="{DynamicResource Info}"/></StackPanel></Border>
+                            <Border Grid.Column="1" Style="{StaticResource CardInner}" Margin="6,0"><StackPanel><TextBlock Text="UPLOAD" Style="{StaticResource SectionLabel}"/><TextBlock Text="{Binding HttpResult.UploadMbps, StringFormat={}{0:F1} Mbps}" Style="{StaticResource Metric}" Foreground="{DynamicResource Success}"/></StackPanel></Border>
+                            <Border Grid.Column="2" Style="{StaticResource CardInner}" Margin="6,0,0,0"><StackPanel><TextBlock Text="PING" Style="{StaticResource SectionLabel}"/><TextBlock Text="{Binding HttpResult.PingMs, StringFormat={}{0:F0} ms}" Style="{StaticResource Metric}" Foreground="{DynamicResource Warning}"/></StackPanel></Border>
+                        </Grid>
+                        <ProgressBar AutomationProperties.Name="Progress" Value="{Binding SpeedProgress}" Maximum="100" Height="4" Margin="0,14,0,0" Visibility="{Binding IsHttpTesting, Converter={StaticResource FlexVis}}"/>
+                        <TextBlock Text="{Binding HttpStatus}" Style="{StaticResource Subtle}" Margin="0,6,0,0"/>
+                        <Button Content="Cancel" Command="{Binding CancelSpeedCommand}" Style="{StaticResource GhostButton}" AutomationProperties.Name="Cancel HTTP speed test" Margin="0,6,0,0" HorizontalAlignment="Left" Visibility="{Binding IsHttpTesting, Converter={StaticResource FlexVis}}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Info: Ookla vs HTTP explanation -->
+                <Border Grid.Row="1" Grid.ColumnSpan="2" Background="{DynamicResource Surface2}" BorderBrush="{DynamicResource Border1}" BorderThickness="1"
+                        CornerRadius="8" Padding="12,10" Margin="0,12,0,0">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE946;" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets"
+                                   FontSize="14" Foreground="{DynamicResource Info}" VerticalAlignment="Top" Margin="0,0,10,0"/>
+                        <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource TextSecondary}" FontSize="12">
+                            <Run FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}">Ookla</Run><Run Text=" measures raw TCP throughput to a nearby server — most accurate for ISP bandwidth. "/>
+                            <Run FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}">HTTP</Run><Run Text=" tests download/upload via Cloudflare CDN — reflects real web browsing speed but may show lower results due to HTTP overhead and CDN routing."/>
+                        </TextBlock>
+                    </StackPanel>
+                </Border>
+
+                <!-- Ookla History -->
+                <Border Grid.Row="2" Grid.Column="0" Style="{StaticResource Card}" Margin="0,16,0,0">
+                    <StackPanel>
+                        <DockPanel>
+                            <TextBlock Text="Ookla History" Style="{StaticResource SectionTitle}"/>
+                            <Button Content="Clear" Command="{Binding ClearOoklaHistoryCommand}" Style="{StaticResource GhostButton}"
+                                    AutomationProperties.Name="Clear Ookla history"
+                                    HorizontalAlignment="Right" DockPanel.Dock="Right" Padding="12,4" FontSize="12"/>
+                        </DockPanel>
+                        <DataGrid ItemsSource="{Binding OoklaHistory}" AutoGenerateColumns="False"
+                                  IsReadOnly="True" HeadersVisibility="Column" CanUserReorderColumns="False"
+                                  CanUserResizeColumns="True" CanUserResizeRows="False" GridLinesVisibility="None"
+                                  Background="Transparent" BorderThickness="0" Margin="0,8,0,0"
+                                  MaxHeight="260" VerticalScrollBarVisibility="Auto"
+                                  AutomationProperties.Name="Ookla speed test history"
+                                  VirtualizingPanel.IsVirtualizing="True"
+                                  VirtualizingPanel.VirtualizationMode="Recycling">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Date" Binding="{Binding CompletedAt, StringFormat={}{0:dd MMM HH:mm}}" Width="110" MinWidth="80"/>
+                                <DataGridTextColumn Header="Down (Mbps)" Binding="{Binding DownloadMbps, StringFormat={}{0:F1}}" Width="90" MinWidth="70"/>
+                                <DataGridTextColumn Header="Up (Mbps)" Binding="{Binding UploadMbps, StringFormat={}{0:F1}}" Width="80" MinWidth="60"/>
+                                <DataGridTextColumn Header="Ping (ms)" Binding="{Binding PingMs, StringFormat={}{0:F0}}" Width="70" MinWidth="60"/>
+                                <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="*" MinWidth="80"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <TextBlock Text="No history yet — run a test to start tracking."
+                                   Style="{StaticResource Subtle}" Margin="0,8,0,0"
+                                   Visibility="{Binding OoklaHistory.Count, Converter={StaticResource FlexVis}, ConverterParameter=Inverse}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- HTTP History -->
+                <Border Grid.Row="2" Grid.Column="1" Style="{StaticResource Card}" Margin="16,16,0,0">
+                    <StackPanel>
+                        <DockPanel>
+                            <TextBlock Text="HTTP History" Style="{StaticResource SectionTitle}"/>
+                            <Button Content="Clear" Command="{Binding ClearHttpHistoryCommand}" Style="{StaticResource GhostButton}"
+                                    AutomationProperties.Name="Clear HTTP history"
+                                    HorizontalAlignment="Right" DockPanel.Dock="Right" Padding="12,4" FontSize="12"/>
+                        </DockPanel>
+                        <DataGrid ItemsSource="{Binding HttpHistory}" AutoGenerateColumns="False"
+                                  IsReadOnly="True" HeadersVisibility="Column" CanUserReorderColumns="False"
+                                  CanUserResizeColumns="True" CanUserResizeRows="False" GridLinesVisibility="None"
+                                  Background="Transparent" BorderThickness="0" Margin="0,8,0,0"
+                                  MaxHeight="260" VerticalScrollBarVisibility="Auto"
+                                  AutomationProperties.Name="HTTP speed test history"
+                                  VirtualizingPanel.IsVirtualizing="True"
+                                  VirtualizingPanel.VirtualizationMode="Recycling">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Date" Binding="{Binding CompletedAt, StringFormat={}{0:dd MMM HH:mm}}" Width="110" MinWidth="80"/>
+                                <DataGridTextColumn Header="Down (Mbps)" Binding="{Binding DownloadMbps, StringFormat={}{0:F1}}" Width="90" MinWidth="70"/>
+                                <DataGridTextColumn Header="Up (Mbps)" Binding="{Binding UploadMbps, StringFormat={}{0:F1}}" Width="80" MinWidth="60"/>
+                                <DataGridTextColumn Header="Ping (ms)" Binding="{Binding PingMs, StringFormat={}{0:F0}}" Width="70" MinWidth="60"/>
+                                <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="*" MinWidth="80"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <TextBlock Text="No history yet — run a test to start tracking."
+                                   Style="{StaticResource Subtle}" Margin="0,8,0,0"
+                                   Visibility="{Binding HttpHistory.Count, Converter={StaticResource FlexVis}, ConverterParameter=Inverse}"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

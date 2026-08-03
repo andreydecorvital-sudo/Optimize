@@ -1,0 +1,78 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Pp]ublish/
+publish/
+*.user
+*.suo
+*.cache
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.userprefs
+*.pidb
+*.booproj
+
+# Local developer notes (never tracked)
+.session-notes/
+notes-local.md
+scratch.md
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+!packages/build/
+
+# Test results
+TestResults/
+[Tt]est[Rr]esult*/
+coverage*.xml
+coverage*.json
+*.coverage
+*.coveragexml
+
+# Logs
+*.log
+logs/
+
+# Windows / OS cruft
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.stackdump
+
+# Archives in the source tree
+*.7z
+*.zip
+
+# MSIX / ClickOnce / installers
+*.appx
+*.appxbundle
+*.msix
+*.msixbundle
+
+# Rider / ReSharper
+_ReSharper*/
+*.DotSettings.user
+
+# JetBrains
+.idea/
+
+# VS Code (keep workspace settings, ignore per-user)
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+.commitmsg
+
+# Temp / scratch files (any tmp_ or .tmp_ prefix, scratch query files)
+tmp_*.json
+.tmp_*
+*.graphql
+docs/screenshots/temp/

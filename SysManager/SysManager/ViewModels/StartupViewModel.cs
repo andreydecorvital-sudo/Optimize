@@ -1,0 +1,286 @@
+// SysManager · StartupViewModel — manage programs that run at boot
+// Author: laurentiu021 · https://github.com/laurentiu021/SystemManager
+// License: MIT
+
+using System.Collections.ObjectModel;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Serilog;
+using SysManager.Helpers;
+using SysManager.Models;
+using SysManager.Services;
+
+namespace SysManager.ViewModels;
+
+/// <summary>
+/// Startup Manager tab — lists all programs that run at Windows boot
+/// and lets the user enable/disable them non-destructively.
+/// </summary>
+public sealed partial class StartupViewModel : ViewModelBase
+{
+    private readonly StartupService _service;
+    private readonly List<StartupEntry> _allEntries = [];
+
+    public BulkObservableCollection<StartupEntry> Entries { get; } = new();
+
+    [ObservableProperty] private bool _isElevated;
+    [ObservableProperty] private int _enabledCount;
+    [ObservableProperty] private int _disabledCount;
+    [ObservableProperty] private int _totalCount;
+    [ObservableProperty] private string _scanSummary = "Click Scan to discover startup items.";
+    [ObservableProperty] private bool _hideWindowsEntries;
+
+    public StartupViewModel(StartupService service)
+    {
+        _service = service;
+        IsElevated = AdminHelper.IsElevated();
+        // Scan, EnableAll and ToggleEntry all read or write the same startup registry/task
+        // state; running them concurrently could interleave registry writes and produce
+        // inconsistent counts. Re-evaluate their CanExecute when IsBusy flips so only one
+        // runs at a time. The startup auto-scan calls ScanAsync directly (not via the
+        // command), so it is unaffected by the gate.
+        PropertyChanged += OnVmPropertyChanged;
+        InitializeAsync(InitAsync);
+    }
+
+    /// <summary>Gate so Scan / EnableAll / ToggleEntry can't overlap and interleave their
+    /// registry writes.</summary>
+    private bool NotBusy => !IsBusy;
+
+    private void OnVmPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(IsBusy)) return;
+        ScanCommand.NotifyCanExecuteChanged();
+        EnableAllCommand.NotifyCanExecuteChanged();
+        ToggleEntryCommand.NotifyCanExecuteChanged();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            PropertyChanged -= OnVmPropertyChanged;
+        base.Dispose(disposing);
+    }
+
+    partial void OnHideWindowsEntriesChanged(bool value) => ApplyFilter();
+
+    private async Task InitAsync()
+    {
+        try { await ScanAsync(); }
+        catch (InvalidOperationException ex) { Log.Warning("Startup auto-scan failed: {Error}", ex.Message); }
+        catch (UnauthorizedAccessException ex) { Log.Warning("Startup auto-scan failed: {Error}", ex.Message); }
+    }
+
+    [RelayCommand]
+    private void RelaunchAsAdmin()
+    {
+        if (AdminHelper.RelaunchAsAdmin())
+            System.Windows.Application.Current?.Shutdown();
+    }
+
+    [RelayCommand(CanExecute = nameof(NotBusy))]
+    private async Task ScanAsync()
+    {
+        IsBusy = true;
+        StatusMessage = "Scanning startup items…";
+        try
+        {
+            var items = await _service.ScanAsync().ConfigureAwait(false);
+            var sorted = items.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            foreach (var item in sorted)
+            {
+                var exePath = ExtractExecutablePath(item.Command);
+                item.Icon = IconExtractorService.GetIcon(exePath ?? item.Command);
+            }
+
+            if (System.Windows.Application.Current?.Dispatcher is { } dispatcher)
+            {
+                dispatcher.Invoke(() =>
+                {
+                    _allEntries.Clear();
+                    _allEntries.AddRange(sorted);
+                    ApplyFilter();
+                });
+            }
+            else
+            {
+                _allEntries.Clear();
+                _allEntries.AddRange(sorted);
+                ApplyFilter();
+            }
+
+            StatusMessage = $"Found {_allEntries.Count} startup items.";
+            ToastService.Instance.Show("Scan complete", $"{_allEntries.Count} startup items found");
+        }
+        catch (InvalidOperationException ex)
+        {
+            StatusMessage = $"Scan failed: {ex.Message}";
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            StatusMessage = $"Scan failed: {ex.Message}";
+        }
+        finally { IsBusy = false; }
+    }
+
+    [RelayCommand(CanExecute = nameof(NotBusy))]
+    private async Task ToggleEntryAsync(object? parameter)
+    {
+        if (parameter is not StartupEntry entry) return;
+
+        // The CheckBox two-way binding has already flipped IsEnabled before
+        // this command runs. We use the current (already-flipped) value as
+        // the desired new state.
+        var desiredState = entry.IsEnabled;
+        // Resume on the UI thread (no ConfigureAwait(false)): the continuation reads/writes
+        // bound state (UpdateCounts enumerates the DataGrid-bound Entries, entry.IsEnabled,
+        // StatusMessage). SetEnabledAsync keeps its own internal ConfigureAwait(false).
+        // Matches the documented rule in ServicesViewModel.StartServiceAsync.
+        var success = await StartupService.SetEnabledAsync(entry, desiredState);
+        if (success)
+        {
+            UpdateCounts();
+            StatusMessage = $"{entry.Name} {(desiredState ? "enabled" : "disabled")}.";
+            Log.Information("Startup entry toggled: {Action}", desiredState ? "enabled" : "disabled");
+        }
+        else
+        {
+            // Revert the CheckBox state since the operation failed
+            entry.IsEnabled = !desiredState;
+            StatusMessage = $"Could not toggle {entry.Name} — {entry.StatusText}";
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(NotBusy))]
+    private async Task EnableAllAsync()
+    {
+        var toEnable = Entries.Where(e => !e.IsEnabled).ToList();
+        if (toEnable.Count == 0)
+        {
+            StatusMessage = "All startup items are already enabled.";
+            return;
+        }
+
+        // Enabling every disabled item at once re-arms programs the user (or another tool)
+        // deliberately turned off, and each one adds boot time. Confirm the bulk change first —
+        // matching the confirm-before-bulk-write pattern used across the app (AppBlocker, Cleanup).
+        if (!DialogService.Instance.Confirm(
+                $"Re-enable {toEnable.Count} disabled startup item(s)?\n\n" +
+                "Each will run again at the next boot. You can disable any of them again individually.",
+                "Enable All Startup Items — Confirm"))
+            return;
+
+        IsBusy = true;
+        try
+        {
+            // Report the outcome honestly: SetEnabledAsync returns false (and sets the
+            // entry's StatusText) when a registry/task write fails, e.g. an item that
+            // needs elevation. Previously every failure was swallowed and the status
+            // still claimed "All items enabled."
+            var enabled = 0;
+            var failed = 0;
+            foreach (var entry in toEnable)
+            {
+                // Resume on the UI thread (no ConfigureAwait(false)): the loop body and the
+                // trailing UpdateCounts() enumerate the DataGrid-bound Entries and touch bound
+                // state. Off-thread (as before) a concurrent ApplyFilter — e.g. the user flipping
+                // "Hide Windows entries" — mutates Entries mid-enumeration and throws
+                // "Collection was modified". SetEnabledAsync keeps its own ConfigureAwait(false).
+                if (await StartupService.SetEnabledAsync(entry, true))
+                    enabled++;
+                else
+                    failed++;
+            }
+
+            UpdateCounts();
+            StatusMessage = failed == 0
+                ? $"Enabled {enabled} startup item(s)."
+                : $"Enabled {enabled} of {toEnable.Count} — {failed} could not be enabled (may require administrator).";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private void OpenFileLocation(object? parameter)
+    {
+        if (parameter is not StartupEntry entry) return;
+        try
+        {
+            var path = ExtractExecutablePath(entry.Command);
+            if (path is not null && System.IO.File.Exists(path))
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = $"/select,\"{path}\"",
+                    UseShellExecute = true
+                })?.Dispose();
+            }
+            else
+            {
+                StatusMessage = "File not found — the application may have been moved or uninstalled.";
+            }
+        }
+        catch (InvalidOperationException) { StatusMessage = "Could not open file location."; }
+        catch (System.ComponentModel.Win32Exception) { StatusMessage = "Could not open file location."; }
+    }
+
+    private static string? ExtractExecutablePath(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return null;
+        var cmd = command.Trim();
+
+        if (cmd.StartsWith('"'))
+        {
+            var endQuote = cmd.IndexOf('"', 1);
+            if (endQuote > 1)
+                return cmd[1..endQuote];
+        }
+
+        if (System.IO.File.Exists(cmd)) return cmd;
+
+        var extensions = new[] { ".exe", ".bat", ".cmd", ".com" };
+        for (var i = 0; i < cmd.Length; i++)
+        {
+            if (cmd[i] != ' ') continue;
+            var candidate = cmd[..i];
+            if (System.IO.File.Exists(candidate)) return candidate;
+            foreach (var ext in extensions)
+            {
+                if (candidate.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
+                    break;
+                if (System.IO.File.Exists(candidate + ext))
+                    return candidate + ext;
+            }
+        }
+
+        return null;
+    }
+
+    private void UpdateCounts()
+    {
+        EnabledCount = Entries.Count(e => e.IsEnabled);
+        DisabledCount = Entries.Count(e => !e.IsEnabled);
+        TotalCount = Entries.Count;
+        ScanSummary = $"{EnabledCount} enabled · {DisabledCount} disabled · {TotalCount} total";
+    }
+
+    private void ApplyFilter()
+    {
+        var filtered = HideWindowsEntries
+            ? _allEntries.Where(e => !IsWindowsEntry(e))
+            : _allEntries;
+
+        Entries.ReplaceWith(filtered);
+
+        UpdateCounts();
+    }
+
+    private static bool IsWindowsEntry(StartupEntry entry)
+        => entry.Publisher.Contains("Microsoft", StringComparison.OrdinalIgnoreCase) ||
+           entry.Command.Contains(@"\Windows\", StringComparison.OrdinalIgnoreCase) ||
+           entry.Command.Contains(@"\Microsoft\", StringComparison.OrdinalIgnoreCase);
+}
