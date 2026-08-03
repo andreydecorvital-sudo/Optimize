@@ -8,6 +8,7 @@ using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
 using FlaUI.Core.Tools;
 using FlaUI.UIA3;
+using SysManager.Services;
 
 namespace SysManager.UITests;
 
@@ -17,6 +18,16 @@ namespace SysManager.UITests;
 /// </summary>
 public sealed class PtBrSurfaceUiTests
 {
+    private static readonly Dictionary<string, string> NavigationLabelOverrides = new(StringComparer.Ordinal)
+    {
+        ["nav-privacy-monitor"] = "Câmera/Microfone/Localização",
+        ["nav-app-alerts"] = "Alertas de aplicativos",
+        ["nav-dns-hosts"] = "DNS e hosts",
+        ["nav-privacy-settings"] = "Privacidade e telemetria",
+        ["nav-app-blocker"] = "Bloqueador de aplicativos",
+        ["nav-profile-export"] = "Exportar/Importar perfil",
+    };
+
     [Fact]
     public void EveryNavigableSurface_HasNoDetectedEnglishUiText()
     {
@@ -44,18 +55,26 @@ public sealed class PtBrSurfaceUiTests
         foreach (var row in AllTabsSmokeUiTests.AllTabs())
         {
             var navId = (string)row[0];
-            var item = window.FindFirstDescendant(cf => cf.ByAutomationId(navId));
+            var expectedHeader = (string)row[1];
+            var visibleLabel = NavigationLabelOverrides.GetValueOrDefault(
+                navId,
+                PtBrLocalizationService.Translate(expectedHeader));
+
+            var item = FindNavigationItem(window, navId, visibleLabel);
             if (item is null)
             {
                 ExpandAllNavGroups(window);
                 item = Retry.WhileNull(
-                    () => window.FindFirstDescendant(cf => cf.ByAutomationId(navId)),
+                    () => FindNavigationItem(window, navId, visibleLabel),
                     TimeSpan.FromSeconds(5)).Result;
             }
 
-            Assert.True(item is not null, $"Item de navegação '{navId}' não encontrado.");
+            Assert.True(
+                item is not null,
+                $"Item de navegação '{navId}' / '{visibleLabel}' não encontrado.");
+
             item!.Click();
-            Thread.Sleep(220);
+            Thread.Sleep(240);
         }
 
         // Open common disconnected surfaces so Popup/ContextMenu/ToolTip translation is exercised.
@@ -70,6 +89,19 @@ public sealed class PtBrSurfaceUiTests
             string.Join("\n", findings.Take(150)));
     }
 
+    private static AutomationElement? FindNavigationItem(Window window, string navId, string visibleLabel)
+    {
+        var byId = window.FindFirstDescendant(cf => cf.ByAutomationId(navId));
+        if (byId is not null) return byId;
+
+        // Some templated WPF containers do not surface AutomationId through UIA. The visible
+        // localized label is the real fallback a keyboard/screen-reader user would encounter.
+        return window.FindAllDescendants()
+            .FirstOrDefault(element =>
+                !string.IsNullOrWhiteSpace(element.Name)
+                && string.Equals(element.Name.Trim(), visibleLabel, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static void ExpandAllNavGroups(Window window)
     {
         foreach (var element in window.FindAllDescendants(cf => cf.ByControlType(ControlType.Group)))
@@ -79,6 +111,8 @@ public sealed class PtBrSurfaceUiTests
                 var pattern = element.Patterns.ExpandCollapse.PatternOrDefault;
                 if (pattern is not null && pattern.ExpandCollapseState.Value == ExpandCollapseState.Collapsed)
                     pattern.Expand();
+                else if (pattern is null)
+                    element.Click();
             }
             catch (Exception)
             {
@@ -86,7 +120,7 @@ public sealed class PtBrSurfaceUiTests
             }
         }
 
-        Thread.Sleep(400);
+        Thread.Sleep(450);
     }
 
     private static void OpenFirstAvailableComboBox(Window window)
