@@ -109,12 +109,15 @@ internal static partial class PtBrLiveAuditService
         if (string.IsNullOrWhiteSpace(text)) return false;
         var trimmed = text.Trim();
         if (TechnicalExact.Contains(trimmed)) return false;
-        if (trimmed.StartsWith(("http://", "https://", "file://", "pack://"), StringComparison.OrdinalIgnoreCase))
+        if (trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("file://", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("pack://", StringComparison.OrdinalIgnoreCase))
             return false;
         if (trimmed.Contains('\\') || trimmed.Contains("::", StringComparison.Ordinal))
             return false;
 
-        var words = WordRegex().Matches(trimmed).Select(match => match.Value).ToArray();
+        var words = WordRegex().Matches(trimmed).Cast<Match>().Select(match => match.Value).ToArray();
         if (words.Length == 0) return false;
 
         var english = words.Count(EnglishHints.Contains);
