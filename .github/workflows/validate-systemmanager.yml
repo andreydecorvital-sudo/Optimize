@@ -22,13 +22,13 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: Enforce pt-BR interface
+      - name: Enforce pt-BR source interface
         run: python tools/ptbr_audit.py --strict
 
-      - name: Upload pt-BR audit
+      - name: Upload pt-BR source audit
         uses: actions/upload-artifact@v4
         with:
-          name: optimize-ptbr-audit
+          name: optimize-ptbr-source-audit
           path: artifacts/ptbr-audit.txt
           if-no-files-found: error
 
@@ -37,6 +37,40 @@ jobs:
 
       - name: Build Optimize
         run: dotnet build SysManager/SysManager/SysManager.csproj --configuration Release --no-restore
+
+      - name: Build rendered-interface audit
+        run: dotnet build SysManager/SysManager.UITests/SysManager.UITests.csproj --configuration Release --no-restore
+
+      - name: Audit rendered pt-BR interface across all tabs
+        run: >-
+          dotnet test SysManager/SysManager.UITests/SysManager.UITests.csproj
+          --configuration Release
+          --no-build
+          --filter FullyQualifiedName~PtBrSurfaceUiTests
+          --logger "trx;LogFileName=ptbr-surface.trx"
+          --results-directory artifacts/test-results
+
+      - name: Collect live pt-BR audit
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          $liveAudit = Join-Path $env:LOCALAPPDATA 'Optimize\ptbr-live-audit.log'
+          if (Test-Path $liveAudit) {
+            Copy-Item $liveAudit artifacts/ptbr-live-audit.log -Force
+          } else {
+            'Live UI audit file was not created.' | Set-Content artifacts/ptbr-live-audit.log
+          }
+
+      - name: Upload rendered pt-BR audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimize-ptbr-rendered-audit
+          path: |
+            artifacts/ptbr-live-audit.log
+            artifacts/test-results/
+          if-no-files-found: error
 
       - name: Restore Windows x64 runtime
         run: dotnet restore SysManager/SysManager/SysManager.csproj --runtime win-x64
