@@ -12,7 +12,12 @@ public static class PtBrRuntimeFallbackCatalog
 {
     private static readonly (string English, string Portuguese)[] Replacements =
     [
+        // Repair an inherited broad "Drive " replacement that could corrupt the OneDrive brand.
+        ("OneUnidade", "OneDrive"),
+
         // Strings discovered by the rendered-interface audit.
+        ("Edge is active (background mode / startup boost may be on).", "O Edge está ativo (o modo em segundo plano ou a inicialização acelerada pode estar ativada)."),
+        (" is not installed.", " não está instalado."),
         ("No activity recorded yet", "Nenhuma atividade registrada ainda"),
         ("No pending reboots", "Nenhuma reinicialização pendente"),
         ("No critical events (last 7 days)", "Nenhum evento crítico nos últimos 7 dias"),
