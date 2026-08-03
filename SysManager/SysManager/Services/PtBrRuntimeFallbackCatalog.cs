@@ -16,6 +16,10 @@ public static class PtBrRuntimeFallbackCatalog
         ("OneUnidade", "OneDrive"),
 
         // Strings discovered by the rendered-interface audit.
+        ("Add files above to securely erase them beyond recovery.", "Adicione arquivos acima para excluí-los com segurança e sem possibilidade de recuperação."),
+        ("Shred All", "Excluir tudo com segurança"),
+        ("Status", "Estado"),
+        ("Quick", "Rápido"),
         ("Edge is active (background mode / startup boost may be on).", "O Edge está ativo (o modo em segundo plano ou a inicialização acelerada pode estar ativada)."),
         (" is not installed.", " não está instalado."),
         ("No activity recorded yet", "Nenhuma atividade registrada ainda"),
