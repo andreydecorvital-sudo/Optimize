@@ -2,6 +2,7 @@
 // Original project: laurentiu021/SystemManager · MIT License
 
 using System.Collections.Concurrent;
+using System.IO;
 using System.Text.RegularExpressions;
 
 namespace SysManager.Services;
