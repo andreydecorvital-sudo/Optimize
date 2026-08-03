@@ -12,7 +12,22 @@ public static class PtBrRuntimeFallbackCatalog
 {
     private static readonly (string English, string Portuguese)[] Replacements =
     [
+        // Strings discovered by the rendered-interface audit.
         ("No activity recorded yet", "Nenhuma atividade registrada ainda"),
+        ("No pending reboots", "Nenhuma reinicialização pendente"),
+        ("No critical events (last 7 days)", "Nenhum evento crítico nos últimos 7 dias"),
+        (" app updates available", " atualizações de aplicativos disponíveis"),
+        ("All SMART indicators healthy", "Todos os indicadores SMART estão saudáveis"),
+        ("No exclusion folders", "Nenhuma pasta de exclusão"),
+        ("Add a folder above to exclude it from Defender scans.", "Adicione uma pasta acima para excluí-la das verificações do Defender."),
+        ("No notification senders found", "Nenhum aplicativo com notificações foi encontrado"),
+        ("Apps appear here after they show their first notification — or nothing matches your search.", "Os aplicativos aparecem aqui depois da primeira notificação — ou nenhum resultado corresponde à pesquisa."),
+        ("Apply pending notification changes", "Aplicar alterações pendentes de notificações"),
+        ("Allow notifications from:", "Permitir notificações de:"),
+        ("Defender status loaded.", "Estado do Defender carregado."),
+        (" · driver ", " · versão do driver "),
+        ("Disabled", "Desativado"),
+
         ("Export failed (access denied):", "Falha ao exportar (acesso negado):"),
         ("Import failed (access denied):", "Falha ao importar (acesso negado):"),
         ("Failed to save report (access denied):", "Falha ao salvar o relatório (acesso negado):"),
