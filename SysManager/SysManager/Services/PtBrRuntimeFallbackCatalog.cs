@@ -5,11 +5,25 @@ namespace SysManager.Services;
 
 /// <summary>
 /// Handles dynamic messages whose error/detail suffix is supplied at runtime.
-/// Only known user-facing prefixes are replaced; the actual system/vendor error text remains
-/// intact, which is preferable to inventing a translation for technical diagnostics.
+/// Exact one-word labels are kept separate so translations such as "All" never corrupt words
+/// like "Install". Prefix/sentence replacements remain intentionally narrow.
 /// </summary>
 public static class PtBrRuntimeFallbackCatalog
 {
+    private static readonly Dictionary<string, string> Exact = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Status"] = "Estado",
+        ["Quick"] = "Rápido",
+        ["All"] = "Todos",
+        ["DOWNLOAD"] = "RECEBIMENTO",
+        ["UPLOAD"] = "ENVIO",
+        ["Shred All"] = "Excluir tudo com segurança",
+        ["Deselect All"] = "Desmarcar tudo",
+        ["Select All"] = "Selecionar tudo",
+        ["No results yet"] = "Nenhum resultado ainda",
+        ["No output yet"] = "Nenhuma saída ainda",
+    };
+
     private static readonly (string English, string Portuguese)[] Replacements =
     [
         // Repair an inherited broad "Drive " replacement that could corrupt the OneDrive brand.
@@ -24,17 +38,7 @@ public static class PtBrRuntimeFallbackCatalog
         ("Output from running operations will stream here.", "A saída das operações em execução aparecerá aqui."),
         ("Run a check to scan for winget upgrades.", "Execute uma verificação para procurar atualizações pelo WinGet."),
         ("Click Scan to list installed applications.", "Clique em Analisar para listar os aplicativos instalados."),
-        ("No results yet", "Nenhum resultado ainda"),
-        ("No output yet", "Nenhuma saída ainda"),
-        ("Deselect All", "Desmarcar tudo"),
-        ("Select All", "Selecionar tudo"),
-        ("DOWNLOAD", "RECEBIMENTO"),
-        ("UPLOAD", "ENVIO"),
-        ("All", "Todos"),
         ("Add files above to securely erase them beyond recovery.", "Adicione arquivos acima para excluí-los com segurança e sem possibilidade de recuperação."),
-        ("Shred All", "Excluir tudo com segurança"),
-        ("Status", "Estado"),
-        ("Quick", "Rápido"),
         ("Edge is active (background mode / startup boost may be on).", "O Edge está ativo (o modo em segundo plano ou a inicialização acelerada pode estar ativada)."),
         (" is not installed.", " não está instalado."),
         ("No activity recorded yet", "Nenhuma atividade registrada ainda"),
@@ -133,6 +137,15 @@ public static class PtBrRuntimeFallbackCatalog
     public static string Translate(string? text)
     {
         if (string.IsNullOrWhiteSpace(text)) return text ?? string.Empty;
+
+        var trimmed = text.Trim();
+        if (Exact.TryGetValue(trimmed, out var exact))
+        {
+            var leading = text.Length - text.TrimStart().Length;
+            var trailing = text.Length - text.TrimEnd().Length;
+            return new string(' ', leading) + exact + new string(' ', trailing);
+        }
+
         var result = text;
         foreach (var (english, portuguese) in Replacements)
             result = result.Replace(english, portuguese, StringComparison.OrdinalIgnoreCase);
