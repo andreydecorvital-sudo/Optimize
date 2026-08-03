@@ -126,7 +126,7 @@ public sealed class PtBrSurfaceUiTests
             return ["O arquivo de auditoria em tempo real não foi criado."];
 
         return File.ReadAllLines(auditPath)
-            .Where(line => line.StartsWith('[', StringComparison.Ordinal))
+            .Where(line => line.StartsWith("[", StringComparison.Ordinal))
             .Distinct(StringComparer.Ordinal)
             .ToList();
     }
