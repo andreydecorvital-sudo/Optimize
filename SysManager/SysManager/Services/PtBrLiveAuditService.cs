@@ -36,14 +36,19 @@ internal static partial class PtBrLiveAuditService
 
     private static readonly HashSet<string> PortugueseHints = new(StringComparer.OrdinalIgnoreCase)
     {
-        "abrir", "administrador", "análise", "analisar", "aplicar", "arquivo", "arquivos",
-        "atualização", "atualizações", "atualizar", "ativado", "ativar", "bateria",
-        "cancelar", "carregando", "concluído", "configuração", "configurações", "confirmar",
-        "criar", "desativado", "desativar", "detalhes", "disponível", "erro", "excluir",
-        "exportar", "falha", "fechar", "memória", "modo", "monitor", "não", "pasta",
-        "perfil", "processo", "processos", "recomendado", "rede", "remover", "reparar",
-        "restaurar", "salvar", "saúde", "segurança", "selecionar", "serviço", "serviços",
-        "sistema", "status", "verificação", "verificar"
+        "abrir", "acima", "adicionado", "adicionar", "administrador", "análise", "analisar",
+        "aparecem", "aplicativos", "aplicar", "arquivo", "arquivos", "atividade", "atualização",
+        "atualizações", "atualizar", "ativado", "ativar", "banda", "bateria", "cancelar",
+        "carregado", "carregando", "comportamento", "concluído", "configuração", "configurações",
+        "confirmar", "controles", "criar", "depois", "desativado", "desativar", "detalhes",
+        "dias", "disponíveis", "disponível", "estado", "estados", "erro", "excluir", "exportar",
+        "falha", "fechar", "inesperado", "informe", "largura", "memória", "modo", "monitor",
+        "nenhum", "nenhuma", "não", "notificação", "notificações", "pasta", "pastas", "pendente",
+        "pendentes", "perfil", "permitir", "pesquisa", "primeira", "processo", "processos",
+        "recentemente", "recomendado", "recurso", "rede", "remover", "reparar", "resultado",
+        "restaurar", "salvar", "saudáveis", "saúde", "segurança", "selecionar", "serviço",
+        "serviços", "sistema", "últimos", "validado", "varreduras", "verificação", "verificações",
+        "verificar", "versão"
     };
 
     private static readonly HashSet<string> TechnicalExact = new(StringComparer.OrdinalIgnoreCase)
@@ -123,7 +128,10 @@ internal static partial class PtBrLiveAuditService
 
         var english = words.Count(EnglishHints.Contains);
         var portuguese = words.Count(PortugueseHints.Contains);
-        return english > 0 && english >= portuguese;
+
+        // A sentence with at least as much Portuguese evidence as English evidence is not a
+        // localization failure. This avoids false positives such as "Monitor de largura de banda".
+        return english > 0 && english > portuguese;
     }
 
     [GeneratedRegex(@"\s+")]
