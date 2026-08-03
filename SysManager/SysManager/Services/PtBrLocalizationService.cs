@@ -13,12 +13,15 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Media;
 using System.Windows.Media.Media3D;
+using Serilog;
 
 namespace SysManager.Services;
 
 /// <summary>
-/// Applies pt-BR translations to the actual WPF interface, including controls created after
+/// Applies pt-BR translations to the real WPF interface, including controls created after
 /// startup, popups, context menus, tooltips, dialogs and custom dependency properties.
+/// Localization is best-effort per element: an incompatible third-party control is logged and
+/// skipped instead of preventing the application from opening.
 /// </summary>
 public static class PtBrLocalizationService
 {
@@ -28,9 +31,6 @@ public static class PtBrLocalizationService
     private static readonly ConcurrentDictionary<Type, StringPropertyAccessor[]> AccessorCache = new();
     private static int _globalHandlersRegistered;
 
-    // WPF-UI and the imported application use several different property names for visible text.
-    // Reflection keeps this layer independent from one control library while SetCurrentValue keeps
-    // bindings intact for dependency properties.
     private static readonly string[] UiStringPropertyNames =
     [
         "Text", "Content", "Header", "Title", "ToolTip", "PlaceholderText",
@@ -65,11 +65,6 @@ public static class PtBrLocalizationService
         return PtBrRuntimeFallbackCatalog.Translate(translated);
     }
 
-    /// <summary>
-    /// Installs class-level Loaded handlers. Unlike a handler attached only to MainWindow, these
-    /// handlers also receive elements created inside disconnected Popup/ContextMenu trees and
-    /// secondary windows.
-    /// </summary>
     public static void InitializeApplication()
     {
         ConfigureCulture();
@@ -77,70 +72,77 @@ public static class PtBrLocalizationService
 
         PtBrLiveAuditService.StartSession();
 
-        EventManager.RegisterClassHandler(
+        TryLocalization(() => EventManager.RegisterClassHandler(
             typeof(FrameworkElement),
             FrameworkElement.LoadedEvent,
             new RoutedEventHandler(OnAnyElementLoaded),
-            true);
+            true), "registro global de FrameworkElement");
 
-        EventManager.RegisterClassHandler(
+        TryLocalization(() => EventManager.RegisterClassHandler(
             typeof(FrameworkContentElement),
             FrameworkContentElement.LoadedEvent,
             new RoutedEventHandler(OnAnyElementLoaded),
-            true);
+            true), "registro global de FrameworkContentElement");
     }
 
     public static void Attach(Window window)
     {
-        InitializeApplication();
+        TryLocalization(InitializeApplication, "inicialização da localização");
 
-        if (!AttachedWindows.TryGetValue(window, out _))
+        TryLocalization(() =>
         {
-            AttachedWindows.Add(window, Marker);
-            window.Loaded += OnWindowLoaded;
-            window.Activated += OnWindowActivated;
-            window.ContextMenuOpening += OnContextMenuOpening;
-            window.ToolTipOpening += OnToolTipOpening;
-        }
+            if (!AttachedWindows.TryGetValue(window, out _))
+            {
+                AttachedWindows.Add(window, Marker);
+                window.Loaded += OnWindowLoaded;
+                window.Activated += OnWindowActivated;
+                window.ContextMenuOpening += OnContextMenuOpening;
+                window.ToolTipOpening += OnToolTipOpening;
+            }
+        }, "eventos da janela");
 
-        Observe(window);
-        TranslateWindow(window);
+        TryLocalization(() => Observe(window), "observação da janela");
+        TryLocalization(() => TranslateWindow(window), "tradução inicial da janela");
     }
 
     public static void TranslateWindow(Window window)
     {
         TranslateTree(window);
         if (window.DataContext is ViewModels.MainWindowViewModel vm)
-            window.SetCurrentValue(Window.TitleProperty, vm.IsElevated ? "Optimize — Administrador" : "Optimize");
+            TryLocalization(
+                () => window.SetCurrentValue(Window.TitleProperty, vm.IsElevated ? "Optimize — Administrador" : "Optimize"),
+                "título da janela");
     }
 
     private static void OnWindowLoaded(object sender, RoutedEventArgs e)
     {
-        if (sender is Window window) TranslateWindow(window);
+        if (sender is Window window)
+            TryLocalization(() => TranslateWindow(window), "janela carregada");
     }
 
     private static void OnWindowActivated(object? sender, EventArgs e)
     {
-        if (sender is Window window) TranslateWindow(window);
+        if (sender is Window window)
+            TryLocalization(() => TranslateWindow(window), "janela ativada");
     }
 
     private static void OnAnyElementLoaded(object sender, RoutedEventArgs e)
     {
         if (sender is not DependencyObject element) return;
-        TranslateElement(element);
-        Observe(element);
+        TryLocalization(() => TranslateElement(element), $"Loaded de {element.GetType().Name}");
+        TryLocalization(() => Observe(element), $"observação de {element.GetType().Name}");
     }
 
     private static void OnContextMenuOpening(object sender, ContextMenuEventArgs e)
     {
         if (e.OriginalSource is FrameworkElement { ContextMenu: { } menu })
-            TranslateTree(menu);
+            TryLocalization(() => TranslateTree(menu), "menu de contexto");
     }
 
     private static void OnToolTipOpening(object sender, ToolTipEventArgs e)
     {
         if (e.OriginalSource is FrameworkElement { ToolTip: DependencyObject tooltip })
-            TranslateTree(tooltip);
+            TryLocalization(() => TranslateTree(tooltip), "dica de ferramenta");
     }
 
     private static void TranslateTree(DependencyObject root)
@@ -154,11 +156,24 @@ public static class PtBrLocalizationService
             var current = pending.Pop();
             if (!visited.Add(current)) continue;
 
-            TranslateElement(current);
-            Observe(current);
+            TryLocalization(() => TranslateElement(current), $"elemento {current.GetType().Name}");
+            TryLocalization(() => Observe(current), $"observação de {current.GetType().Name}");
 
-            foreach (var child in EnumerateChildren(current))
+            foreach (var child in SafeChildren(current))
                 pending.Push(child);
+        }
+    }
+
+    private static IReadOnlyList<DependencyObject> SafeChildren(DependencyObject root)
+    {
+        try
+        {
+            return EnumerateChildren(root).Where(child => child is not null).ToArray();
+        }
+        catch (Exception ex) when (IsRecoverable(ex))
+        {
+            Log.Debug(ex, "pt-BR: falha ao percorrer filhos de {ControlType}", root.GetType().FullName);
+            return [];
         }
     }
 
@@ -166,17 +181,32 @@ public static class PtBrLocalizationService
     {
         if (root is Visual or Visual3D)
         {
-            int count;
+            var count = 0;
             try { count = VisualTreeHelper.GetChildrenCount(root); }
-            catch (InvalidOperationException) { count = 0; }
+            catch (Exception ex) when (IsRecoverable(ex))
+            {
+                Log.Debug(ex, "pt-BR: árvore visual indisponível para {ControlType}", root.GetType().FullName);
+            }
 
             for (var i = 0; i < count; i++)
-                yield return VisualTreeHelper.GetChild(root, i);
+            {
+                DependencyObject? child = null;
+                try { child = VisualTreeHelper.GetChild(root, i); }
+                catch (Exception ex) when (IsRecoverable(ex))
+                {
+                    Log.Debug(ex, "pt-BR: filho visual indisponível para {ControlType}", root.GetType().FullName);
+                }
+
+                if (child is not null) yield return child;
+            }
         }
 
         System.Collections.IEnumerable? logicalChildren = null;
         try { logicalChildren = LogicalTreeHelper.GetChildren(root); }
-        catch (InvalidOperationException) { /* Some disconnected objects have no logical tree. */ }
+        catch (Exception ex) when (IsRecoverable(ex))
+        {
+            Log.Debug(ex, "pt-BR: árvore lógica indisponível para {ControlType}", root.GetType().FullName);
+        }
 
         if (logicalChildren is not null)
         {
@@ -185,27 +215,12 @@ public static class PtBrLocalizationService
                     yield return dependencyObject;
         }
 
-        switch (root)
-        {
-            case Popup { Child: { } popupChild }:
-                yield return popupChild;
-                break;
-            case FrameworkElement { ContextMenu: { } contextMenu }:
-                yield return contextMenu;
-                break;
-        }
-
-        if (root is FrameworkElement { ToolTip: DependencyObject toolTip })
-            yield return toolTip;
-
-        if (root is ContentControl { Content: DependencyObject content })
-            yield return content;
-
-        if (root is HeaderedContentControl { Header: DependencyObject header })
-            yield return header;
-
-        if (root is HeaderedItemsControl { Header: DependencyObject itemsHeader })
-            yield return itemsHeader;
+        if (root is Popup { Child: { } popupChild }) yield return popupChild;
+        if (root is FrameworkElement { ContextMenu: { } contextMenu }) yield return contextMenu;
+        if (root is FrameworkElement { ToolTip: DependencyObject toolTip }) yield return toolTip;
+        if (root is ContentControl { Content: DependencyObject content }) yield return content;
+        if (root is HeaderedContentControl { Header: DependencyObject header }) yield return header;
+        if (root is HeaderedItemsControl { Header: DependencyObject itemsHeader }) yield return itemsHeader;
 
         if (root is ItemsControl itemsControl)
         {
@@ -215,53 +230,41 @@ public static class PtBrLocalizationService
         }
 
         if (root is DataGrid dataGrid)
-        {
-            foreach (var column in dataGrid.Columns)
-                yield return column;
-        }
+            foreach (var column in dataGrid.Columns) yield return column;
 
         if (root is ListView { View: GridView gridView })
-        {
-            foreach (var column in gridView.Columns)
-                yield return column;
-        }
+            foreach (var column in gridView.Columns) yield return column;
 
         if (root is TextBlock textBlock)
-        {
-            foreach (var inline in textBlock.Inlines)
-                yield return inline;
-        }
+            foreach (var inline in textBlock.Inlines) yield return inline;
 
         if (root is Span span)
-        {
-            foreach (var inline in span.Inlines)
-                yield return inline;
-        }
+            foreach (var inline in span.Inlines) yield return inline;
 
         if (root is Paragraph paragraph)
-        {
-            foreach (var inline in paragraph.Inlines)
-                yield return inline;
-        }
+            foreach (var inline in paragraph.Inlines) yield return inline;
 
-        if (root is RichTextBox { Document: { } richDocument })
-            yield return richDocument;
-
-        if (root is FlowDocumentScrollViewer { Document: { } viewerDocument })
-            yield return viewerDocument;
+        if (root is RichTextBox { Document: { } richDocument }) yield return richDocument;
+        if (root is FlowDocumentScrollViewer { Document: { } viewerDocument }) yield return viewerDocument;
     }
 
     private static void TranslateElement(DependencyObject element)
     {
-        if (element is TextBlock textBlock)
-            TranslateTextBlock(textBlock);
-        else if (element is Run run)
-            TranslateRun(run);
+        if (element is TextBlock textBlock) TranslateTextBlock(textBlock);
+        else if (element is Run run) TranslateRun(run);
 
-        foreach (var accessor in AccessorCache.GetOrAdd(element.GetType(), BuildAccessors))
-            TranslateProperty(element, accessor);
+        StringPropertyAccessor[] accessors;
+        try { accessors = AccessorCache.GetOrAdd(element.GetType(), BuildAccessors); }
+        catch (Exception ex) when (IsRecoverable(ex))
+        {
+            Log.Debug(ex, "pt-BR: propriedades indisponíveis para {ControlType}", element.GetType().FullName);
+            accessors = [];
+        }
 
-        TranslateAutomationText(element);
+        foreach (var accessor in accessors)
+            TryLocalization(() => TranslateProperty(element, accessor), $"{element.GetType().Name}.{accessor.Name}");
+
+        TryLocalization(() => TranslateAutomationText(element), $"automação de {element.GetType().Name}");
     }
 
     private static void TranslateTextBlock(TextBlock text)
@@ -277,8 +280,8 @@ public static class PtBrLocalizationService
         foreach (var inline in text.Inlines)
         {
             if (inline is not Run run) continue;
-            TranslateRun(run);
-            Observe(run);
+            TryLocalization(() => TranslateRun(run), "Run em TextBlock");
+            TryLocalization(() => Observe(run), "observação de Run");
         }
     }
 
@@ -300,13 +303,13 @@ public static class PtBrLocalizationService
                 ? element.GetValue(dependencyProperty) as string
                 : accessor.Property?.GetValue(element) as string;
         }
-        catch (TargetInvocationException)
+        catch (Exception ex) when (IsRecoverable(ex))
         {
+            Log.Debug(ex, "pt-BR: leitura recusada em {ControlType}.{Property}", element.GetType().FullName, accessor.Name);
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(current) || !ShouldTranslateProperty(element, accessor.Name))
-            return;
+        if (string.IsNullOrWhiteSpace(current) || !ShouldTranslateProperty(element, accessor.Name)) return;
 
         var translated = Translate(current);
         PtBrLiveAuditService.Inspect(element.GetType().Name, accessor.Name, translated);
@@ -319,18 +322,15 @@ public static class PtBrLocalizationService
             else
                 accessor.Property?.SetValue(element, translated);
         }
-        catch (Exception ex) when (ex is InvalidOperationException or TargetInvocationException or ArgumentException)
+        catch (Exception ex) when (IsRecoverable(ex))
         {
-            // Read-only template state or a control that rejects late mutation. The live audit
-            // still records the string so it can be fixed at the source instead.
+            Log.Debug(ex, "pt-BR: escrita recusada em {ControlType}.{Property}", element.GetType().FullName, accessor.Name);
         }
     }
 
     private static bool ShouldTranslateProperty(DependencyObject element, string propertyName)
     {
         if (!string.Equals(propertyName, "Text", StringComparison.Ordinal)) return true;
-
-        // Never rewrite user input. Read-only output fields can still be localized.
         if (element is TextBox textBox) return textBox.IsReadOnly;
 
         var typeName = element.GetType().Name;
@@ -359,32 +359,28 @@ public static class PtBrLocalizationService
         if (Observed.TryGetValue(element, out _)) return;
         Observed.Add(element, Marker);
 
-        foreach (var accessor in AccessorCache.GetOrAdd(element.GetType(), BuildAccessors))
+        StringPropertyAccessor[] accessors;
+        try { accessors = AccessorCache.GetOrAdd(element.GetType(), BuildAccessors); }
+        catch (Exception ex) when (IsRecoverable(ex))
         {
-            if (accessor.DependencyProperty is not { } dependencyProperty) continue;
-            AddValueChanged(element, dependencyProperty);
+            Log.Debug(ex, "pt-BR: não foi possível observar {ControlType}", element.GetType().FullName);
+            accessors = [];
         }
+
+        foreach (var accessor in accessors)
+            if (accessor.DependencyProperty is { } dependencyProperty)
+                AddValueChanged(element, dependencyProperty);
 
         AddValueChanged(element, AutomationProperties.NameProperty);
         AddValueChanged(element, AutomationProperties.HelpTextProperty);
 
         switch (element)
         {
-            case Popup popup:
-                popup.Opened += OnPopupOpened;
-                break;
-            case ContextMenu contextMenu:
-                contextMenu.Opened += OnContextMenuOpened;
-                break;
-            case ToolTip toolTip:
-                toolTip.Opened += OnToolTipOpened;
-                break;
-            case MenuItem menuItem:
-                menuItem.SubmenuOpened += OnMenuItemSubmenuOpened;
-                break;
-            case ComboBox comboBox:
-                comboBox.DropDownOpened += OnComboBoxDropDownOpened;
-                break;
+            case Popup popup: popup.Opened += OnPopupOpened; break;
+            case ContextMenu contextMenu: contextMenu.Opened += OnContextMenuOpened; break;
+            case ToolTip toolTip: toolTip.Opened += OnToolTipOpened; break;
+            case MenuItem menuItem: menuItem.SubmenuOpened += OnMenuItemSubmenuOpened; break;
+            case ComboBox comboBox: comboBox.DropDownOpened += OnComboBoxDropDownOpened; break;
         }
     }
 
@@ -395,46 +391,46 @@ public static class PtBrLocalizationService
             DependencyPropertyDescriptor.FromProperty(property, element.GetType())
                 ?.AddValueChanged(element, OnDynamicPropertyChanged);
         }
-        catch (ArgumentException)
+        catch (Exception ex) when (IsRecoverable(ex))
         {
-            // The property is not registered for this derived type.
+            Log.Debug(ex, "pt-BR: observação recusada em {ControlType}", element.GetType().FullName);
         }
     }
 
     private static void OnDynamicPropertyChanged(object? sender, EventArgs e)
     {
         if (sender is DependencyObject element)
-            TranslateElement(element);
+            TryLocalization(() => TranslateElement(element), $"mudança dinâmica em {element.GetType().Name}");
     }
 
     private static void OnPopupOpened(object? sender, EventArgs e)
     {
         if (sender is Popup popup)
-            TranslateTree(popup.Child ?? popup);
+            TryLocalization(() => TranslateTree(popup.Child ?? popup), "Popup aberto");
     }
 
     private static void OnContextMenuOpened(object? sender, RoutedEventArgs e)
     {
         if (sender is ContextMenu contextMenu)
-            TranslateTree(contextMenu);
+            TryLocalization(() => TranslateTree(contextMenu), "ContextMenu aberto");
     }
 
     private static void OnToolTipOpened(object? sender, RoutedEventArgs e)
     {
         if (sender is ToolTip toolTip)
-            TranslateTree(toolTip);
+            TryLocalization(() => TranslateTree(toolTip), "ToolTip aberto");
     }
 
     private static void OnMenuItemSubmenuOpened(object sender, RoutedEventArgs e)
     {
         if (sender is MenuItem menuItem)
-            TranslateTree(menuItem);
+            TryLocalization(() => TranslateTree(menuItem), "submenu aberto");
     }
 
     private static void OnComboBoxDropDownOpened(object? sender, EventArgs e)
     {
         if (sender is ComboBox comboBox)
-            TranslateTree(comboBox);
+            TryLocalization(() => TranslateTree(comboBox), "ComboBox aberto");
     }
 
     private static StringPropertyAccessor[] BuildAccessors(Type type)
@@ -442,14 +438,26 @@ public static class PtBrLocalizationService
         var accessors = new List<StringPropertyAccessor>();
         foreach (var propertyName in UiStringPropertyNames)
         {
-            var dependencyProperty = FindDependencyProperty(type, propertyName);
+            DependencyProperty? dependencyProperty = null;
+            try { dependencyProperty = FindDependencyProperty(type, propertyName); }
+            catch (Exception ex) when (IsRecoverable(ex))
+            {
+                Log.Debug(ex, "pt-BR: DP {Property} indisponível em {ControlType}", propertyName, type.FullName);
+            }
+
             if (dependencyProperty is not null)
             {
                 accessors.Add(new StringPropertyAccessor(propertyName, dependencyProperty, null));
                 continue;
             }
 
-            var property = type.GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public);
+            PropertyInfo? property = null;
+            try { property = type.GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public); }
+            catch (Exception ex) when (IsRecoverable(ex))
+            {
+                Log.Debug(ex, "pt-BR: propriedade {Property} indisponível em {ControlType}", propertyName, type.FullName);
+            }
+
             if (property is null || !property.CanRead || !property.CanWrite || property.GetIndexParameters().Length != 0)
                 continue;
 
@@ -474,6 +482,20 @@ public static class PtBrLocalizationService
 
         return null;
     }
+
+    private static void TryLocalization(Action action, string context)
+    {
+        try { action(); }
+        catch (Exception ex) when (IsRecoverable(ex))
+        {
+            Log.Debug(ex, "pt-BR: falha isolada durante {Context}", context);
+        }
+    }
+
+    private static bool IsRecoverable(Exception ex)
+        => ex is not OutOfMemoryException
+            and not StackOverflowException
+            and not AccessViolationException;
 
     private sealed record StringPropertyAccessor(
         string Name,
