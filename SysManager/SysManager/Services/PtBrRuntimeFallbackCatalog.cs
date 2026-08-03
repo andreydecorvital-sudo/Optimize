@@ -12,6 +12,7 @@ public static class PtBrRuntimeFallbackCatalog
 {
     private static readonly (string English, string Portuguese)[] Replacements =
     [
+        ("No activity recorded yet", "Nenhuma atividade registrada ainda"),
         ("Export failed (access denied):", "Falha ao exportar (acesso negado):"),
         ("Import failed (access denied):", "Falha ao importar (acesso negado):"),
         ("Failed to save report (access denied):", "Falha ao salvar o relatório (acesso negado):"),
