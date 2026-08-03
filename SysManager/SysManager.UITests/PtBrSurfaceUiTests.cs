@@ -13,8 +13,10 @@ using SysManager.Services;
 namespace SysManager.UITests;
 
 /// <summary>
-/// Launches the real application, visits every navigable tab and then reads the audit produced
-/// by PtBrLiveAuditService. This verifies the rendered interface rather than only source literals.
+/// Launches the real application, visits every navigable tab and verifies the rendered interface.
+/// In addition to the English detector, this test writes a raw census of EVERY text surfaced by
+/// Windows UI Automation per page. The census intentionally performs no language classification;
+/// it exists so localization can be reviewed from the real rendered product instead of heuristics.
 /// </summary>
 public sealed class PtBrSurfaceUiTests
 {
@@ -36,8 +38,15 @@ public sealed class PtBrSurfaceUiTests
             "Optimize",
             "ptbr-live-audit.log");
 
+        var repositoryRoot = GetRepositoryRoot();
+        var inventoryDirectory = Path.Combine(repositoryRoot, "artifacts", "test-results");
+        var inventoryPath = Path.Combine(inventoryDirectory, "ptbr-ui-inventory.txt");
+        Directory.CreateDirectory(inventoryDirectory);
+
         try { if (File.Exists(auditPath)) File.Delete(auditPath); }
         catch (IOException) { /* A previous crashed test may still be releasing the handle. */ }
+        try { if (File.Exists(inventoryPath)) File.Delete(inventoryPath); }
+        catch (IOException) { /* Best effort; inventory must never stop the application test. */ }
 
         using var automation = new UIA3Automation();
         using var app = Application.Launch(new ProcessStartInfo
@@ -57,6 +66,9 @@ public sealed class PtBrSurfaceUiTests
 
         Assert.True(treeReady, "A árvore visual do Optimize não terminou de carregar.\n" + DescribeTree(window));
         ExpandAllNavGroups(window);
+
+        WriteInventoryHeader(inventoryPath);
+        CaptureSurfaceInventory(window, "nav-dashboard", "Visão geral", inventoryPath);
 
         foreach (var row in AllTabsSmokeUiTests.AllTabs())
         {
@@ -85,13 +97,15 @@ public sealed class PtBrSurfaceUiTests
                 $"Item de navegação '{navId}' / '{visibleLabel}' não encontrado.\n" + DescribeTree(window));
 
             item!.Click();
-            Thread.Sleep(300);
+            Thread.Sleep(450);
+            CaptureSurfaceInventory(window, navId, visibleLabel, inventoryPath);
         }
 
         // Open common disconnected surfaces so Popup/ContextMenu/ToolTip translation is exercised.
         OpenFirstAvailableComboBox(window);
         OpenFirstAvailableMenu(window);
         Thread.Sleep(700);
+        CaptureSurfaceInventory(window, "disconnected-surfaces", "Pop-ups e menus", inventoryPath);
 
         var findings = ReadAuditFindings(auditPath);
         Assert.True(
@@ -99,6 +113,64 @@ public sealed class PtBrSurfaceUiTests
             "A interface executada ainda contém possíveis textos em inglês:\n" +
             string.Join("\n", findings.Take(200)));
     }
+
+    private static void WriteInventoryHeader(string inventoryPath)
+    {
+        File.AppendAllText(
+            inventoryPath,
+            "OPTIMIZE · CENSO BRUTO DA INTERFACE RENDERIZADA\n" +
+            "Gerado por UI Automation. Nenhuma classificação de idioma é aplicada aqui.\n" +
+            "Cada seção corresponde a uma página realmente aberta pelo teste.\n" +
+            new string('=', 88) + "\n\n");
+    }
+
+    private static void CaptureSurfaceInventory(
+        Window window,
+        string pageId,
+        string pageLabel,
+        string inventoryPath)
+    {
+        try
+        {
+            var rows = window.FindAllDescendants()
+                .Select(element => new
+                {
+                    Type = element.ControlType.ToString(),
+                    Id = element.AutomationId?.Trim() ?? string.Empty,
+                    Name = element.Name?.Trim() ?? string.Empty,
+                })
+                .Where(row => !string.IsNullOrWhiteSpace(row.Name))
+                .Where(row => row.Name.Length <= 600)
+                .DistinctBy(row => $"{row.Type}|{row.Id}|{row.Name}", StringComparer.Ordinal)
+                .OrderBy(row => row.Type, StringComparer.Ordinal)
+                .ThenBy(row => row.Name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            var lines = new List<string>
+            {
+                $"### {pageId} · {pageLabel}",
+                $"Elementos textuais expostos: {rows.Length}",
+            };
+
+            lines.AddRange(rows.Select(row =>
+                $"[{row.Type}] id='{row.Id}' :: {NormalizeInventoryText(row.Name)}"));
+            lines.Add(string.Empty);
+
+            File.AppendAllLines(inventoryPath, lines);
+        }
+        catch (Exception ex)
+        {
+            File.AppendAllText(
+                inventoryPath,
+                $"### {pageId} · {pageLabel}\n[FALHA AO INVENTARIAR] {ex.GetType().Name}: {ex.Message}\n\n");
+        }
+    }
+
+    private static string NormalizeInventoryText(string text)
+        => string.Join(" ", text
+            .Replace("\r", " ", StringComparison.Ordinal)
+            .Replace("\n", " ", StringComparison.Ordinal)
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries));
 
     private static AutomationElement? FindNavigationItem(
         Window window,
@@ -204,10 +276,12 @@ public sealed class PtBrSurfaceUiTests
             .ToList();
     }
 
+    private static string GetRepositoryRoot()
+        => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+
     private static string FindExecutable()
     {
-        var repositoryRoot = Path.GetFullPath(Path.Combine(
-            AppContext.BaseDirectory, "..", "..", "..", ".."));
+        var repositoryRoot = GetRepositoryRoot();
 
         foreach (var configuration in new[] { "Release", "Debug" })
         {
