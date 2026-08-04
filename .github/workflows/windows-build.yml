@@ -1,0 +1,57 @@
+name: Windows build
+
+on:
+  push:
+    branches:
+      - main
+      - "agent/**"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore Optimize.sln
+
+      - name: Build
+        run: dotnet build Optimize.sln --configuration Release --no-restore
+
+      - name: Publish self-contained Windows x64
+        run: >-
+          dotnet publish src/Optimize.App/Optimize.App.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          -p:PublishSingleFile=false
+          -p:DebugType=None
+          -p:DebugSymbols=false
+
+      - name: Verify executable exists
+        shell: pwsh
+        run: |
+          $exe = "src/Optimize.App/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish/Optimize.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Optimize.exe was not generated."
+          }
+
+      - name: Upload recovery build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Optimize-v0.2.1-recovery-win-x64
+          path: src/Optimize.App/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish/
+          if-no-files-found: error
